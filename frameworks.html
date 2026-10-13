@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frameworks &amp; Tools</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="frameworks.html" class="on">Frameworks</a><a href="genai-notes.html">GenAI notes</a></div></header>
+<main>
+<h1>Frameworks &amp; Tools for LLM / RAG Apps</h1>
+<div class="sub">What LangSmith, LangGraph, LlamaIndex, Haystack, Semantic Kernel and plain SDKs are for, and when to pick each</div>
+<nav>
+<a href="#map">Big picture</a>
+<a href="#langsmith">LangSmith</a>
+<a href="#langgraph">LangGraph</a>
+<a href="#llamaindex">LlamaIndex</a>
+<a href="#haystack">Haystack</a>
+<a href="#sk">Semantic Kernel</a>
+<a href="#sdk">Plain SDKs</a>
+<a href="#choose">Choosing</a>
+</nav>
+
+<section id="map">
+<h2>The big picture</h2>
+<p>Moving from "a prompt that works" to production software raises two different needs, and different tools address them:</p>
+<table>
+<tr><th>Need</th><th>Tools</th><th>One-line role</th></tr>
+<tr><td><b>Build</b> the pipeline or agent</td><td>LlamaIndex, Haystack, Semantic Kernel, LangGraph, plain SDKs</td><td>How data and steps flow</td></tr>
+<tr><td><b>Observe and test</b> it</td><td>LangSmith (also tools like Ragas, DeepEval)</td><td>See what happened and score it</td></tr>
+</table>
+<p class="muted">These are not mutually exclusive. LangSmith can trace apps that don't use LangChain, and LlamaIndex or Haystack components can sit inside a larger custom app.</p>
+</section>
+
+<section id="langsmith">
+<h2>LangSmith: tracing, debugging and evaluating</h2>
+<p><b>Analogy:</b> the flight data recorder and diagnostic dashboard.</p>
+<p><b>The problem:</b> one user prompt may trigger a chain: an LLM call to rewrite the query, a vector search, a rerank, and a final LLM answer. If the final answer is wrong, without visibility you can't tell which step broke.</p>
+<ul>
+<li><b>Tracing and observability:</b> logs every step of the execution: exact input and output of each LLM call, tokens used, latency per step, and the metadata filters sent to the vector DB. A black box becomes an auditable timeline.</li>
+<li><b>Debugging:</b> if a call fails or returns malformed JSON, find that exact step, tweak the prompt in the web playground and test the fix without re-running your whole codebase.</li>
+<li><b>Evaluation:</b> build "golden" datasets of real queries paired with ideal answers, then run automated evals on new prompts, embedding models or chunking settings against metrics like faithfulness and answer relevance (see <a href="genai-notes.html#t6">Evaluating RAG</a>).</li>
+</ul>
+<div class="note"><b>When to use:</b> every time you deploy an LLM app, to watch quality, latency and cost.</div>
+</section>
+
+<section id="langgraph">
+<h2>LangGraph: stateful, multi-step workflows</h2>
+<p><b>Analogy:</b> the flight controls and engine that navigate the plane.</p>
+<p><b>The problem:</b> classic chains are linear (A → B → C). Real AI apps need loops, conditions and error correction. LangGraph is an open-source framework for building <b>stateful, cyclical, multi-step agents</b> as a graph.</p>
+<pre>User query
+    │
+    ▼
+ LLM agent  ◄──────────────────────────┐
+    │                                  │
+ [Tool needed?]                        │
+   │ yes                 │ no          │
+   ▼                     ▼             │
+ Execute tool         Generate         │
+ (vector/SQL/API)     final answer     │
+   │                                   │
+   └────────── iteration loop ─────────┘</pre>
+<ul>
+<li><b>Centralised state:</b> a shared <em>State</em> object. Every node (an LLM, a DB query, a human approval step) reads it, does its work and writes updates back.</li>
+<li><b>Cycles and loops:</b> an agent can call a tool, inspect the result, decide the data is incomplete, try another tool and repeat until it can answer. This is the mechanism behind <a href="genai-notes.html#t3">Agentic RAG</a>.</li>
+<li><b>Persistence and time travel:</b> state is saved by a checkpointer, so a workflow can pause indefinitely for human-in-the-loop approval (e.g. an admin approves an email before sending). You can also rewind a broken run to an earlier step, fix the logic and resume.</li>
+</ul>
+
+<h3>LangSmith vs LangGraph</h3>
+<table>
+<tr><th>Feature</th><th>LangSmith</th><th>LangGraph</th></tr>
+<tr><td>Purpose</td><td>Monitoring, testing, debugging</td><td>Building agentic, complex workflows</td></tr>
+<tr><td>Analogy</td><td>Black box and diagnostic dashboard</td><td>Flight controls and engine</td></tr>
+<tr><td>Use when</td><td>Always, for any deployed LLM app</td><td>You need loops, self-correction or human approvals</td></tr>
+</table>
+</section>
+
+<section id="llamaindex">
+<h2>LlamaIndex: data ingestion and RAG-focused apps</h2>
+<p>A <b>data-centric</b> framework built specifically for RAG and document-heavy agents. Data is the first-class citizen.</p>
+<ul>
+<li><b>Strength, ingestion:</b> hundreds of data connectors (LlamaHub) to load and parse messy sources (PDF, Notion, Slack, SQL) with little code.</li>
+<li><b>Strength, retrieval:</b> hierarchical nodes, knowledge graphs, sentence-window indexes, query routing and recursive retrieval out of the box.</li>
+<li><b>Catch:</b> high-level "magic" such as <code>VectorStoreIndex.from_documents(...)</code> is great for prototypes but can hide mechanics, making it harder to debug or tune a specific bottleneck later.</li>
+</ul>
+<div class="note"><b>Pick it when:</b> the hard part of your project is getting varied documents in and retrieving from them well.</div>
+</section>
+
+<section id="haystack">
+<h2>Haystack: production-oriented RAG pipelines</h2>
+<p>From deepset. A <b>modular, engineering-first</b> framework for search-centric, production-grade apps.</p>
+<ul>
+<li><b>Explicit architecture:</b> you declare components (<code>DocumentSplitter</code>, retriever, <code>PromptBuilder</code>, generator) and wire them with <code>pipeline.connect("a", "b")</code>. Nothing is hidden.</li>
+<li><b>Strength:</b> deterministic routing makes pipelines stable, transparent and easy to trace and debug. Good monitoring, strict validation, and strong integration with OpenSearch and Elasticsearch.</li>
+<li><b>Catch:</b> with few "smart" shortcuts, trying experimental retrieval ideas often means writing your own components.</li>
+</ul>
+<div class="note"><b>Pick it when:</b> you want clear, auditable, maintainable pipelines for a large enterprise search setting.</div>
+</section>
+
+<section id="sk">
+<h2>Semantic Kernel: Microsoft's integration framework</h2>
+<p>Microsoft's SDK for orchestrating AI capabilities: plugins, memory and native code. It is an <b>orchestration engine</b>, not a pure RAG framework, and fits naturally into C# / .NET (it also has Python and Java versions) and Azure.</p>
+<ul>
+<li><b>Azure fit:</b> Azure AI Search for retrieval, Azure OpenAI for generation, Entra ID for access control.</li>
+<li><b>RAG style:</b> you define native <em>plugins</em> (functions over corporate data) that the LLM can call.</li>
+<li><b>Catch:</b> in a lightweight Python stack outside Azure it adds rigid enterprise overhead you don't need.</li>
+</ul>
+<div class="note"><b>Pick it when:</b> your company is a Microsoft / Azure / .NET shop with strong identity and compliance requirements.</div>
+</section>
+
+<section id="sdk">
+<h2>Plain SDKs: the framework-free path</h2>
+<p>Write ordinary code directly against provider SDKs (<code>openai</code>, <code>anthropic</code>, <code>pinecone</code>...). Many teams do this for simple apps.</p>
+<table>
+<tr><th>Approach</th><th>Adds value when</th><th>Adds complexity when</th></tr>
+<tr><td><b>Frameworks</b> (LlamaIndex, Haystack)</td><td>Complex, multi-source pipelines needing chunking, hybrid search or reranking out of the box. Early prototyping to test ideas fast.</td><td>Debugging bottlenecks (magic hides errors in library code). Framework lock-in, where breaking changes force rewrites.</td></tr>
+<tr><td><b>Plain SDKs</b> (custom code)</td><td>Simple RAG (one query → one table by cosine similarity). Very large systems (roughly 10M+ documents) where you need fine control of memory, latency and DB tuning.</td><td>Adding features like hybrid search or query expansion: you write, test and maintain the boilerplate yourself.</td></tr>
+</table>
+</section>
+
+<section id="choose">
+<h2>Choosing and combining</h2>
+<table>
+<tr><th>If your situation is...</th><th>Lean towards</th></tr>
+<tr><td>Many messy document sources, need good retrieval fast</td><td>LlamaIndex</td></tr>
+<tr><td>Enterprise search with auditability, OpenSearch/Elasticsearch</td><td>Haystack</td></tr>
+<tr><td>Azure / .NET shop, Entra ID and compliance</td><td>Semantic Kernel</td></tr>
+<tr><td>Agent with loops, self-correction or human approval</td><td>LangGraph</td></tr>
+<tr><td>Need to trace, debug and evaluate anything you ship</td><td>LangSmith (or an equivalent)</td></tr>
+<tr><td>Simple app, or extreme scale and control</td><td>Plain SDKs</td></tr>
+</table>
+<h3>Hybrid pattern</h3>
+<p>Real architectures rarely pick one. A common split: use <b>LlamaIndex only for ingestion</b> (loading, parsing, embedding), write the vectors to your database, then serve queries with a <b>plain-SDK custom backend</b> to keep runtime latency low and the code simple. Add LangSmith-style tracing and an eval harness regardless.</p>
+<div class="note"><b>Rule of thumb:</b> start with the simplest thing that works (plain SDK or one framework), measure with evals, and add a framework only when it removes real work you would otherwise write and maintain yourself.</div>
+<p class="muted">Frameworks and their APIs change quickly. Check each project's current docs before committing to one.</p>
+</section>
+</main>
+</body>
+</html>
