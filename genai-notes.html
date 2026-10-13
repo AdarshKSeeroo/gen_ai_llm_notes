@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="genai-notes.html" class="on">GenAI notes</a></div></header>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="frameworks.html">Frameworks</a><a href="genai-notes.html" class="on">GenAI notes</a></div></header>
 <main>
 <h1>GenAI Study Notes</h1>
 <div class="sub">Short notes with a core-concepts glossary</div>
@@ -20,6 +20,7 @@
 <a href="#t6">Evaluating RAG</a>
 <a href="#t7">Memory</a>
 <a href="#t8">Tools &amp; structured output</a>
+<a href="#t9">Frameworks</a>
 </nav>
 
 <section id="glossary">
@@ -719,6 +720,21 @@ print(json.dumps(search_config.model_dump(), indent=2))</pre>
 
 <h3>Exercise idea</h3>
 <p class="muted">Define a Pydantic model with a year and department, pass 10 messy queries through it, and feed the filters into a Chroma or Qdrant search. Then add the <code>VerifiedAnswer</code> model and flag any answer whose citations are not found in the retrieved text.</p>
+</section>
+
+<section id="t9">
+<h2>Frameworks &amp; tools (summary)</h2>
+<p>You do not need a framework to build RAG, but you will meet these names. <a href="frameworks.html">Full detail on the Frameworks page.</a></p>
+<table>
+<tr><th>Tool</th><th>What it is</th><th>Strong at</th><th>Watch out for</th></tr>
+<tr><td><b>LangSmith</b></td><td>Observability and evaluation</td><td>Tracing every step (inputs, outputs, tokens, latency), debugging prompts, golden-set evals</td><td>Not a builder; it watches the app, it doesn't run it</td></tr>
+<tr><td><b>LangGraph</b></td><td>Stateful agent workflows as a graph</td><td>Loops, shared state, human-in-the-loop pauses, resume and time travel</td><td>More moving parts than a simple chain</td></tr>
+<tr><td><b>LlamaIndex</b></td><td>Data-centric RAG framework</td><td>Ingestion connectors, advanced indexing and retrieval strategies</td><td>High-level "magic" can hide what is happening</td></tr>
+<tr><td><b>Haystack</b></td><td>Explicit, modular pipelines</td><td>Production, auditability, OpenSearch/Elasticsearch</td><td>Experimental ideas need custom components</td></tr>
+<tr><td><b>Semantic Kernel</b></td><td>Microsoft orchestration SDK</td><td>.NET and Azure (AI Search, Azure OpenAI, Entra ID)</td><td>Overhead outside the Microsoft stack</td></tr>
+<tr><td><b>Plain SDKs</b></td><td>Direct provider libraries</td><td>Simple apps, full control, huge scale</td><td>You build and maintain hybrid search, query expansion etc. yourself</td></tr>
+</table>
+<div class="note"><b>Mental model:</b> LangSmith = the black-box recorder, LangGraph = the flight controls, LlamaIndex = the data loader, Haystack = the explicit pipeline, Semantic Kernel = the Azure/.NET connector. A common hybrid: LlamaIndex for ingestion, plain SDK for serving, tracing on top.</div>
 </section>
 </main>
 </body>
