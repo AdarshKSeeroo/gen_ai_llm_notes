@@ -33,6 +33,7 @@ header{margin-bottom:0}
 h1{font-size:clamp(1.5rem,5vw,2rem);line-height:1.25;margin:0 0 6px}
 h2{font-size:1.3rem;margin:44px 0 12px;padding-top:10px;border-top:1px solid var(--bd)}
 h3{font-size:1.05rem;margin:24px 0 8px}
+h4{font-size:.98rem;margin:20px 0 6px}
 p{margin:.6em 0}
 p.sub,.sub,.subtitle,.muted{color:var(--mut)}
 .sub,.subtitle,p.sub{margin:0 0 20px}

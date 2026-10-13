@@ -139,13 +139,58 @@ Question → Rewrite → Retrieve → Rerank → Build context → Generate → 
 <li><b>RAG vs fine-tuning:</b> RAG for facts that change and need citations; fine-tuning for style/behaviour.</li>
 </ul>
 
-<h3>Advanced patterns (know the names)</h3>
+<h3>Advanced patterns</h3>
+<p>Simple vector search breaks down as RAG scales to enterprise use: accuracy, multi-step reasoning, security and changing data all become problems. These five patterns address them.</p>
+
+<table>
+<tr><th>Pattern</th><th>Best used for</th><th>Complexity</th></tr>
+<tr><td>Parent-document</td><td>Better local context without losing search precision</td><td>Low: simple parent-child mapping</td></tr>
+<tr><td>Hybrid search</td><td>Keyword lookup (SKUs, IDs) plus conceptual meaning</td><td>Medium: manage two index types</td></tr>
+<tr><td>GraphRAG</td><td>Global, cross-document, macro-level questions</td><td>High: heavy LLM cost to build the graph</td></tr>
+<tr><td>Agentic RAG</td><td>Multi-step research that needs tools</td><td>High: loop logic and agent stability</td></tr>
+<tr><td>Updates &amp; permissions</td><td>Enterprise data that changes and is access-controlled</td><td>Medium: sync pipeline and ACL metadata</td></tr>
+</table>
+
+<h4>1. Parent-document retrieval</h4>
 <ul>
-<li><b>Parent-document retrieval</b> — search small chunks, return the larger parent for context.</li>
-<li><b>GraphRAG</b> — build a knowledge graph of entities/relations to answer multi-hop questions.</li>
-<li><b>Agentic RAG</b> — an agent decides when/what to retrieve, can re-query and use multiple sources.</li>
-<li><b>Document updates &amp; access permissions</b> — re-index changed docs, delete old vectors, filter results by user permission via metadata.</li>
+<li><b>Problem:</b> small chunks (e.g. 200 words) match precisely but lose surrounding context; large chunks keep context but dilute the vector match.</li>
+<li><b>Solution:</b> split documents into large <em>parents</em>, then subdivide into small <em>children</em>. Only the children are embedded. At query time a child matches, but the system fetches its whole parent (or a larger window) for the LLM.</li>
+<li><b>Benefit:</b> pinpoint accuracy in search, full context in generation.</li>
 </ul>
+<div class="note"><b>Scenario: aircraft maintenance manual (1,000 pages).</b> A mechanic asks "What is the torque specification for the fuel line clamp?". <b>Standard RAG</b> finds the tiny chunk "Torque the clamp to 15 in-lbs." but misses the header three paragraphs above: "WARNING: applies ONLY to Boeing 737 models manufactured before 2015." The mechanic applies it to a 2024 aircraft, a safety hazard. <b>Parent-document</b> finds the "15 in-lbs" chunk, then pulls the entire 3-page sub-section. The LLM sees the warning and answers: "For pre-2015 models it is 15 in-lbs; verify your aircraft year, as later models need a different procedure."</div>
+
+<h4>2. Hybrid search</h4>
+<ul>
+<li><b>Problem:</b> dense (vector) retrieval handles concepts and synonyms but is poor at exact terms like serial numbers, product IDs or medical codes.</li>
+<li><b>Solution:</b> run two searches at once: <b>dense</b> (embeddings, meaning) and <b>sparse</b> (BM25, exact words).</li>
+<li><b>Fusion:</b> merge the two result lists with <b>Reciprocal Rank Fusion (RRF)</b>, then a reranker cleans up before the LLM.</li>
+</ul>
+<div class="note"><b>Scenario: e-commerce support.</b> An employee types "Customer bought an ultra-durable smartphone screen protector but the SKU-99X42 cracked." <b>Keyword only</b> locks onto "SKU-99X42" but returns invoices and shipping manifests, not troubleshooting guides. <b>Vector only</b> understands "durable screen protector" but ignores the exact SKU and returns generic phone-case warranty pages. <b>Hybrid</b> gets the SKU from BM25 and "cracked glass warranty" and "durability policy" articles from vectors, merges them, and delivers the exact replacement protocol for that product.</div>
+
+<h4>3. GraphRAG</h4>
+<ul>
+<li><b>Problem:</b> standard RAG treats text as independent chunks. Questions that connect dots across a whole corpus ("which financial liabilities do all companies in sector X share?") return only isolated snippets.</li>
+<li><b>Solution:</b> an LLM pre-processes the corpus, extracts <b>entities</b> (people, places, concepts) and <b>relationships</b>, and builds a <b>knowledge graph</b>.</li>
+<li><b>Benefit:</b> at query time the system traverses nodes and edges, enabling holistic summaries, network tracing and multi-hop reasoning.</li>
+</ul>
+<div class="note"><b>Scenario: financial investigation across 10,000 documents.</b> "Summarise the web of shell companies used by Executive John Doe to move money out of Company Alpha." John Doe is on page 4 of Document A, "BlueSky LLC" on page 90 of Document B, Company Alpha on page 12 of Document C. <b>Standard RAG</b> cannot assemble these scattered pieces into one picture. <b>GraphRAG</b> already mapped <code>[John Doe] → owns → [BlueSky LLC] → received wire from → [Company Alpha]</code> and traces those links across the whole corpus into one overview.</div>
+
+<h4>4. Agentic RAG</h4>
+<ul>
+<li><b>Problem:</b> standard RAG is one-shot (query → search → answer). Bad first results mean a bad answer.</li>
+<li><b>Solution:</b> make retrieval an iterative loop run by an agent. It plans a search strategy, judges whether results are useful, <b>rewrites the query and retries</b>, and can query several sources (web docs, SQL tables, internal files), then synthesises them.</li>
+</ul>
+<div class="note"><b>Scenario: a doctor researching a rare genetic mutation.</b> <b>Standard RAG</b> searches the hospital database once, finds nothing, and answers "I cannot find any records." <b>Agentic RAG</b> thinks: "No internal records. I'll rewrite the query with medical synonyms and call the PubMed API." It finds a mouse drug trial, then checks an FDA tool to see if the drug is approved, and returns a multi-source answer.</div>
+
+<h4>5. Document updates &amp; access permissions</h4>
+<ul>
+<li><b>Document updates (dynamic syncing):</b> you cannot re-embed millions of documents on every change. Use <b>incremental indexing</b>: keep an upsert tracking table with a content hash (e.g. MD5) per document or chunk. When a file changes, re-embed only the modified chunks, upsert them, and delete the old vectors.</li>
+<li><b>Access permissions (document-level security):</b> at indexing, tag every chunk with its ACL metadata, e.g. <code>allowed_groups: ["HR", "Exec"]</code>. At query time, take the user's identity token and <b>force a metadata filter</b> onto the vector query before it reaches the database (<code>user_groups</code> must intersect <code>allowed_groups</code>). Users can only ever retrieve what they are permitted to see.</li>
+</ul>
+<div class="note"><b>Scenario: a bank with 50,000 employees.</b>
+<br><b>Updates:</b> the global travel expense policy changes at 9:00 AM Tuesday. Thanks to incremental indexing, an employee asking about hotel budgets at 9:05 gets the new rules, with no downtime and no re-embedding of the whole database.
+<br><b>Permissions:</b> a junior teller and the Chief HR Officer both ask "What are the current compensation ranges for senior management?". For the teller the system silently adds <code>allow_clearance: public</code>; the payroll files are invisible and the LLM says "I do not have access to executive compensation details." For the HR officer the token opens <code>allow_clearance: HR_Exec</code>, the payroll sheets are retrieved, and the exact brackets are shown.</div>
+<p><b>Why filter at retrieval, not in the prompt:</b> never rely on telling the LLM "don't reveal secrets". If restricted text reaches the context window it can leak. The filter must remove it before the LLM sees anything.</p>
 
 <h3>Exercise idea</h3>
 <p class="muted">Basic RAG over 5–10 PDFs → improve chunking → add reranking → add hybrid search; measure each step with RAGAS.</p>
