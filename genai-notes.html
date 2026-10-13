@@ -16,6 +16,7 @@
 <a href="#t1">LLM &amp; Prompting</a>
 <a href="#t3">RAG</a>
 <a href="#t4">Vector DBs</a>
+<a href="#t5">Images &amp; audio</a>
 </nav>
 
 <section id="glossary">
@@ -164,7 +165,7 @@ embed("Quarterly revenue grew 12%")     → [-0.310, 0.205, -0.071, … ] ← fa
 <li>Each dimension has no human-readable meaning on its own; only the <em>distances</em> between vectors matter.</li>
 <li>Queries and documents <b>must be embedded with the same model</b>. Vectors from different models live in different "spaces" and can't be compared.</li>
 <li>Changing the embedding model later means <b>re-embedding everything</b>.</li>
-<li>Embeddings also exist for images and audio (multimodal), so a text query can find a picture.</li>
+<li>Embeddings also exist for images and audio (multimodal), so a text query can find a picture. <a href="#t5">See how below</a>.</li>
 </ul>
 <div class="note"><b>Why this beats keyword search:</b> searching "car insurance claim" finds a chunk titled "Filing a motor vehicle accident report" because the meanings are near. Keyword search would miss it. The reverse weakness: embeddings can blur exact things like product code <code>XJ-4421</code>, which is why hybrid search exists.</div>
 
@@ -260,6 +261,104 @@ Query (each Q):  "How many sick days do I get?"
 
 <h3>Exercise idea</h3>
 <p class="muted">Load the same documents into Chroma and pgvector/Qdrant; compare setup effort, query speed and metadata filtering. Also try one query with a filter that should exclude the best semantic match and confirm it is excluded.</p>
+</section>
+
+<section id="t5">
+<h2>Images &amp; audio: embeddings and generation</h2>
+<p><b>The one-line idea:</b> a neural network cannot read pixels or sound waves directly as "meaning". Every modality is first turned into numbers (a tensor), then an encoder compresses those numbers into a vector. Once it is a vector, all the vector DB ideas above (similarity, ANN, filtering) work exactly the same.</p>
+
+<h3>1. Images → vector embedding</h3>
+<pre>image file → resize/normalise → pixel grid (e.g. 224×224×3 numbers)
+           → split into patches (16×16 pixels each)
+           → vision encoder (ViT: a transformer over patches, or a CNN)
+           → pooled output → vector, e.g. [0.07, -0.31, 0.52, … 512 numbers]</pre>
+<ul>
+<li><b>Pixels:</b> an image is just a grid of numbers (red, green, blue per pixel). Raw pixels are a poor "meaning" signal: the same cat shifted a few pixels is a very different grid.</li>
+<li><b>Patches:</b> a Vision Transformer cuts the image into small squares and treats each patch like a token. Attention then lets patches relate to each other (an ear belongs with a head).</li>
+<li><b>Training signal:</b> the encoder learns from labels, from reconstruction, or (most useful for search) from <b>image + caption pairs</b>.</li>
+</ul>
+
+<h3>2. CLIP: one space for text <em>and</em> images</h3>
+<p>CLIP-style models train two encoders at once, an image encoder and a text encoder, on hundreds of millions of image–caption pairs. <b>Contrastive learning</b> pulls a photo and its caption together in vector space and pushes mismatched pairs apart.</p>
+<pre>embed_image(photo_of_dog.jpg)  → [0.12, 0.44, -0.20, …]
+embed_text("a dog on a beach") → [0.10, 0.47, -0.18, …]   ← close
+embed_text("a tax invoice")    → [-0.52, 0.03, 0.61, …]   ← far</pre>
+<ul>
+<li>This is what makes <b>text → image search</b>, image → image search and zero-shot classification work: compare vectors, nothing else.</li>
+<li>Same rules as text: use the same model for both sides, same metric (usually cosine), re-embed if you change model.</li>
+<li>Examples: OpenAI CLIP, SigLIP, Cohere Embed (multimodal), Google multimodal embeddings, Jina CLIP.</li>
+</ul>
+
+<h3>3. Audio / voice → vector embedding</h3>
+<pre>audio file (waveform: 16,000 samples per second)
+   → resample to a fixed rate, mono
+   → spectrogram (time × frequency picture; often mel-scale)
+   → audio encoder (CNN or transformer, e.g. wav2vec2 / Whisper encoder)
+   → vector (one per clip, or one per short time frame)</pre>
+<p>A <b>spectrogram</b> turns sound into an image-like grid, so audio models borrow a lot from vision models. What the vector captures depends on what the model was trained for:</p>
+<table>
+<tr><th>Goal</th><th>Model type</th><th>Vector represents</th><th>Use</th></tr>
+<tr><td>What was said</td><td>Speech recognition (Whisper, wav2vec2)</td><td>Phonetic / linguistic content per frame, decoded to text</td><td>Transcribe, then embed the <em>text</em> for RAG over calls and meetings</td></tr>
+<tr><td>Who is speaking</td><td>Speaker embedding (x-vector, ECAPA-TDNN)</td><td>Voice identity, independent of words</td><td>Speaker verification, diarisation ("who spoke when"), voice cloning input</td></tr>
+<tr><td>What it sounds like</td><td>Audio-text contrastive (CLAP)</td><td>General sound meaning, shared space with text</td><td>Search "dog barking" or "upbeat piano" across audio</td></tr>
+</table>
+<div class="note"><b>Practical shortcut:</b> for "search my meetings" you rarely embed the audio itself. Transcribe with Whisper, chunk the transcript, and use a normal text embedding model. Embed the audio directly only when the sound itself matters (speaker, music, sound effects).</div>
+
+<h3>4. How the multimodal pieces connect to an LLM</h3>
+<ul>
+<li><b>Separate encoders, shared space:</b> CLIP / CLAP. Good for retrieval, no text generation.</li>
+<li><b>Encoder → projector → LLM (vision-language models):</b> the image encoder's patch vectors are mapped by a small projection layer into the LLM's <em>token embedding space</em>, so image patches act like extra "tokens" the LLM attends to. This is how GPT-4o-style, Gemini, Claude and LLaVA/Llama-vision models "see".</li>
+<li><b>Audio in LLMs:</b> either a speech-to-text step first, or an audio encoder whose output is projected into the LLM the same way.</li>
+</ul>
+<pre>image → vision encoder → patch vectors → projector → [img tok][img tok]…
+                                                          + text tokens "What is in this photo?"
+                                                          → LLM → text answer</pre>
+
+<h3>5. Generation: how new images and audio are made</h3>
+<p>Generation is the reverse direction: start from a prompt (usually an embedding of the text) and produce pixels or a waveform.</p>
+<table>
+<tr><th>Approach</th><th>Intuition</th><th>Used for</th></tr>
+<tr><td><b>Diffusion</b></td><td>Training: take a real image, add noise step by step until it is static, and teach the network to <em>remove</em> a little noise at each step. Generation: start from pure random noise and denoise it step by step, steered by the text embedding.</td><td>Stable Diffusion, DALL·E 3, Midjourney, Imagen; also video (Sora-style) and audio (Stable Audio)</td></tr>
+<tr><td><b>Latent diffusion</b></td><td>Do the denoising in a small compressed "latent" space made by an autoencoder (VAE), not on full pixels. Decode to pixels only at the end. Much cheaper.</td><td>Stable Diffusion family</td></tr>
+<tr><td><b>Autoregressive tokens</b></td><td>Turn the image or audio into discrete tokens with a codec/tokenizer, then predict the next token exactly like an LLM. Decode tokens back to pixels or sound.</td><td>Parti, some GPT/Gemini image output, MusicGen, audio LMs</td></tr>
+<tr><td><b>GAN</b> (older)</td><td>A generator and a discriminator compete; the generator improves by fooling it.</td><td>Face synthesis, upscaling. Largely replaced by diffusion</td></tr>
+</table>
+
+<h3>6. Text prompt → image (step by step)</h3>
+<pre>"a red bicycle at sunset"
+ 1. text encoder (CLIP / T5)   → text embedding(s)
+ 2. random noise in latent space (e.g. 64×64×4)
+ 3. repeat ~20–50 steps:  U-Net / transformer predicts the noise,
+                          guided by the text embedding (classifier-free guidance)
+                          → subtract a bit of noise
+ 4. VAE decoder: latent → full-resolution image</pre>
+<ul>
+<li><b>Guidance scale (CFG):</b> how strongly the image must follow the prompt. Higher = more literal, less natural.</li>
+<li><b>Steps:</b> more steps = finer detail but slower. <b>Seed</b> fixes the starting noise so results are repeatable.</li>
+<li><b>Negative prompt:</b> an embedding to steer <em>away</em> from.</li>
+</ul>
+
+<h3>7. Generating voice</h3>
+<table>
+<tr><th>Task</th><th>Pipeline</th></tr>
+<tr><td><b>Text-to-speech (TTS)</b></td><td>text → phonemes/tokens → model predicts a mel-spectrogram or audio codec tokens → <b>vocoder</b> (HiFi-GAN, neural codec decoder) turns it into a waveform</td></tr>
+<tr><td><b>Voice cloning</b></td><td>a few seconds of reference audio → <b>speaker embedding</b> → fed to the TTS model as a "voice identity" vector, so any text is spoken in that voice</td></tr>
+<tr><td><b>Speech-to-speech / voice conversion</b></td><td>encode content and speaker separately, swap the speaker embedding, decode</td></tr>
+<tr><td><b>Music / sound</b></td><td>text embedding conditions an autoregressive codec-token model (MusicGen) or an audio diffusion model</td></tr>
+</table>
+<div class="note"><b>Safety:</b> voice cloning and realistic image generation enable impersonation and fraud. Use consent, watermarking/provenance (e.g. C2PA) and disclosure in anything you build.</div>
+
+<h3>Recap: embeddings vs generation</h3>
+<table>
+<tr><th></th><th>Embedding (understand / search)</th><th>Generation (create)</th></tr>
+<tr><td>Direction</td><td>Image/audio/text → vector</td><td>Vector or prompt → image/audio/text</td></tr>
+<tr><td>Output</td><td>Fixed-length list of numbers</td><td>Pixels, waveform or tokens</td></tr>
+<tr><td>Typical models</td><td>CLIP, SigLIP, CLAP, speaker encoders, text embedders</td><td>Diffusion, autoregressive transformers, TTS + vocoder</td></tr>
+<tr><td>Stored in</td><td>Vector DB</td><td>Files / object storage (embeddings can be kept for search)</td></tr>
+</table>
+
+<h3>Exercise idea</h3>
+<p class="muted">Embed 20 photos with a CLIP model into Chroma, then search with text queries like "a dog", "a receipt" and "something cozy". Then transcribe one short audio clip with Whisper and ask a question about it using the RAG pipeline from the earlier sections.</p>
 </section>
 </main>
 </body>
