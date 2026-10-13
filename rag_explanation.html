@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLX Scripts — Technical Breakdown</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Highlight.js for Syntax Highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html" class="on">Scripts</a><a href="genai-notes.html">GenAI notes</a></div></header>
+
+    <header>
+        <div class="container">
+            <div class="header-content">
+                <div class="badge-group">
+                    <span class="badge">MLX Framework</span>
+                    <span class="badge purple">Sentence-Transformers</span>
+                    <span class="badge emerald">RAG Architecture</span>
+                    <span class="badge amber">Map-Reduce Summarizer</span>
+                </div>
+                <h1>MLX Toolset — Comprehensive Technical Breakdown</h1>
+                <p class="subtitle">Detailed technical analysis of <code style="font-family:var(--font-mono); color:var(--accent-cyan);">rag_index.py</code>, <code style="font-family:var(--font-mono); color:var(--accent-cyan);">rag_query.py</code>, <code style="font-family:var(--font-mono); color:var(--accent-cyan);">rag_query_web.py</code>, and Map-Reduce document summarization in <code style="font-family:var(--font-mono); color:var(--accent-amber);">summarize.py</code>.</p>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Navigation Tabs -->
+        <div class="nav-tabs">
+            <button class="tab-btn active" onclick="switchTab('overview')">System Overview</button>
+            <button class="tab-btn" onclick="switchTab('index')">1. rag_index.py</button>
+            <button class="tab-btn" onclick="switchTab('query')">2. rag_query.py</button>
+            <button class="tab-btn" onclick="switchTab('query-web')">3. rag_query_web.py</button>
+            <button class="tab-btn" onclick="switchTab('summarize')">4. summarize.py</button>
+            <button class="tab-btn" onclick="switchTab('comparison')">Script Comparison</button>
+        </div>
+
+        <!-- TAB 1: OVERVIEW -->
+        <div id="overview" class="tab-panel active">
+            <div class="arch-card">
+                <h2>RAG & Document Processing Pipelines</h2>
+                <p style="color: var(--text-secondary); font-size: 0.95rem;">Overview of vector indexing, semantic search, hybrid web retrieval, and map-reduce summarization running natively on Apple Silicon with MLX.</p>
+                
+                <div class="pipeline-grid">
+                    <div class="pipeline-step">
+                        <div class="step-number">RAG PIPELINE</div>
+                        <h3>Vector Indexing & Matching</h3>
+                        <p><code style="font-family:var(--font-mono);">SentenceTransformer</code> encodes text to 384-d vectors; NumPy dot product performs fast similarity search.</p>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <div class="step-number">RAG PIPELINE</div>
+                        <h3>Hybrid Knowledge Retrieval</h3>
+                        <p>Combines offline local knowledge vectors with live DuckDuckGo web search snippets.</p>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <div class="step-number">SUMMARIZER PIPELINE</div>
+                        <h3>Multi-Format Text Extraction</h3>
+                        <p>Parses <code style="font-family:var(--font-mono); font-weight:600; color:var(--accent-amber);">.pdf</code> (PyPDF), <code style="font-family:var(--font-mono); font-weight:600; color:var(--accent-amber);">.docx</code> (python-docx), and <code style="font-family:var(--font-mono); font-weight:600; color:var(--accent-amber);">.txt</code>.</p>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <div class="step-number">SUMMARIZER PIPELINE</div>
+                        <h3>Map-Reduce Summarization</h3>
+                        <p>Chunks long texts into 1,200-word blocks, summarizes each, then synthesizes a final summary with MLX LLaMA.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: RAG INDEX -->
+        <div id="index" class="tab-panel">
+            <div class="explanation-grid">
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon"></span> rag_index.py</span>
+                        <button class="copy-btn" onclick="copyCode('code-index')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-python" id="code-index">import json
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+with open("docs.txt") as f:
+    chunks = [line.strip() for line in f if line.strip()]
+
+embeddings = embedder.encode(chunks, normalize_embeddings=True)
+
+np.save("rag_embeddings.npy", embeddings)
+with open("rag_chunks.json", "w") as f:
+    json.dump(chunks, f)
+
+print(f"Indexed {len(chunks)} chunks")</code></pre>
+                    </div>
+                </div>
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 1–3</span><span style="font-size:0.75rem; color:var(--text-muted);">Imports</span></div>
+                        <div class="code-snippet">import json
+import numpy as np
+from sentence_transformers import SentenceTransformer</div>
+                        <div class="explanation-text">Imports <code style="font-family:var(--font-mono);">json</code> for serialization, <code style="font-family:var(--font-mono);">numpy</code> for vector storage, and <code style="font-family:var(--font-mono);">SentenceTransformer</code> to produce embeddings.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Line 5</span><span style="font-size:0.75rem; color:var(--text-muted);">Model Loading</span></div>
+                        <div class="code-snippet">embedder = SentenceTransformer("all-MiniLM-L6-v2")</div>
+                        <div class="explanation-text">Loads 384-dimensional dense sentence transformer model.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 7–14</span><span style="font-size:0.75rem; color:var(--text-muted);">Encoding & Output</span></div>
+                        <div class="code-snippet">embeddings = embedder.encode(chunks, normalize_embeddings=True)
+np.save("rag_embeddings.npy", embeddings)
+with open("rag_chunks.json", "w") as f: json.dump(chunks, f)</div>
+                        <div class="explanation-text">Encodes normalized embeddings ($L_2=1$) and saves vector array + raw text chunks.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 3: RAG QUERY -->
+        <div id="query" class="tab-panel">
+            <div class="explanation-grid">
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon" style="background:var(--accent-purple);"></span> rag_query.py</span>
+                        <button class="copy-btn" onclick="copyCode('code-query')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-python" id="code-query">import json
+import sys
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from mlx_lm import load, generate
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = np.load("rag_embeddings.npy")
+chunks = json.load(open("rag_chunks.json"))
+
+model, tokenizer = load("fused_llama_8bit")
+
+
+def retrieve(query, k=3):
+    q_emb = embedder.encode([query], normalize_embeddings=True)[0]
+    scores = embeddings @ q_emb
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
+
+
+def answer(query):
+    context = "\n".join(retrieve(query))
+    prompt = (
+        "Answer the question using only the context below. "
+        "If the answer isn't in the context, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    )
+    return generate(model, tokenizer, prompt=prompt, max_tokens=256)
+
+
+if __name__ == "__main__":
+    query = " ".join(sys.argv[1:]) or "where is seeroo it solutions located"
+    print(answer(query))</code></pre>
+                    </div>
+                </div>
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 14–18</span><span style="font-size:0.75rem; color:var(--text-muted);">Vector Search</span></div>
+                        <div class="code-snippet">scores = embeddings @ q_emb
+top_idx = np.argsort(scores)[::-1][:k]</div>
+                        <div class="explanation-text">Computes cosine similarity via matrix dot-product and extracts top $k=3$ matching chunks.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 21–28</span><span style="font-size:0.75rem; color:var(--text-muted);">MLX LLM Inference</span></div>
+                        <div class="code-snippet">return generate(model, tokenizer, prompt=prompt, max_tokens=256)</div>
+                        <div class="explanation-text">Runs inference using 8-bit quantized LLaMA via MLX LM.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 4: RAG QUERY WEB -->
+        <div id="query-web" class="tab-panel">
+            <div class="explanation-grid">
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon" style="background:var(--accent-emerald);"></span> rag_query_web.py</span>
+                        <button class="copy-btn" onclick="copyCode('code-query-web')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-python" id="code-query-web">import json
+import sys
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from ddgs import DDGS
+from mlx_lm import load, generate
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = np.load("rag_embeddings.npy")
+chunks = json.load(open("rag_chunks.json"))
+
+model, tokenizer = load("fused_llama_8bit")
+
+
+def retrieve_local(query, k=3):
+    q_emb = embedder.encode([query], normalize_embeddings=True)[0]
+    scores = embeddings @ q_emb
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
+
+
+def retrieve_web(query, k=3):
+    try:
+        results = DDGS().text(query, max_results=k)
+    except Exception as e:
+        print(f"[web search failed: {e}]", file=sys.stderr)
+        return []
+    return [f"{r['title']}: {r['body']}" for r in results]
+
+
+def answer(query, use_web=True):
+    local_chunks = retrieve_local(query)
+    web_chunks = retrieve_web(query) if use_web else []
+
+    context_parts = []
+    if local_chunks:
+        context_parts.append("From local knowledge base:\n" + "\n".join(local_chunks))
+    if web_chunks:
+        context_parts.append("From web search:\n" + "\n".join(web_chunks))
+    context = "\n\n".join(context_parts)
+
+    prompt = (
+        "Answer the question using only the context below. "
+        "If the answer isn't in the context, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    )
+    return generate(model, tokenizer, prompt=prompt, max_tokens=256)
+
+
+if __name__ == "__main__":
+    query = " ".join(sys.argv[1:]) or "where is seeroo it solutions located"
+    print(answer(query))</code></pre>
+                    </div>
+                </div>
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 22–28</span><span style="font-size:0.75rem; color:var(--text-muted);">DuckDuckGo Web Search</span></div>
+                        <div class="code-snippet">results = DDGS().text(query, max_results=k)</div>
+                        <div class="explanation-text">Fetches live search snippet context via DuckDuckGo API without requiring API tokens.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 5: SUMMARIZE -->
+        <div id="summarize" class="tab-panel">
+            <div class="explanation-grid">
+                <!-- Left: Code -->
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon" style="background:var(--accent-amber);"></span> summarize.py</span>
+                        <button class="copy-btn" onclick="copyCode('code-summarize')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-python" id="code-summarize">import argparse
+import os
+import sys
+from mlx_lm import load, generate
+
+DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+CHUNK_WORDS = 1200
+
+
+def extract_text(path):
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    if ext == ".docx":
+        from docx import Document
+        doc = Document(path)
+        return "\n".join(p.text for p in doc.paragraphs)
+
+    if ext == ".txt":
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    raise ValueError(f"Unsupported file type: {ext} (use .pdf, .docx, or .txt)")
+
+
+def chunk_text(text, chunk_words=CHUNK_WORDS):
+    words = text.split()
+    return [
+        " ".join(words[i:i + chunk_words])
+        for i in range(0, len(words), chunk_words)
+    ]
+
+
+def summarize_chunk(model, tokenizer, text, max_tokens):
+    prompt = (
+        "Summarize the following text concisely, capturing the key points:\n\n"
+        f"{text}\n\nSummary:"
+    )
+    return generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
+
+
+def summarize_document(model, tokenizer, text, max_tokens=300):
+    chunks = chunk_text(text)
+    print(f"[{len(chunks)} chunk(s), {len(text.split())} words total]", file=sys.stderr)
+
+    if len(chunks) == 1:
+        return summarize_chunk(model, tokenizer, chunks[0], max_tokens)
+
+    chunk_summaries = []
+    for i, chunk in enumerate(chunks, 1):
+        print(f"[summarizing chunk {i}/{len(chunks)}]", file=sys.stderr)
+        chunk_summaries.append(summarize_chunk(model, tokenizer, chunk, max_tokens))
+
+    combined = "\n\n".join(chunk_summaries)
+    final_prompt = (
+        "Combine the following section summaries into one coherent overall summary:\n\n"
+        f"{combined}\n\nOverall summary:"
+    )
+    return generate(model, tokenizer, prompt=final_prompt, max_tokens=max_tokens)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Summarize a PDF, DOCX, or TXT file with MLX/Llama.")
+    parser.add_argument("file", help="Path to a .pdf, .docx, or .txt file")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="MLX model path or HF repo")
+    parser.add_argument("--adapter-path", default=None, help="Optional LoRA adapter path")
+    parser.add_argument("--max-tokens", type=int, default=300, help="Max tokens per summary")
+    args = parser.parse_args()
+
+    text = extract_text(args.file)
+    if not text.strip():
+        print("No extractable text found in file.", file=sys.stderr)
+        sys.exit(1)
+
+    load_kwargs = {"adapter_path": args.adapter_path} if args.adapter_path else {}
+    model, tokenizer = load(args.model, **load_kwargs)
+
+    summary = summarize_document(model, tokenizer, text, args.max_tokens)
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+                    </div>
+                </div>
+
+                <!-- Right: Explanations -->
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header">
+                            <span class="line-badge" style="background:rgba(245, 158, 11, 0.15); color:var(--accent-amber);">Lines 7–8</span>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Configuration Constants</span>
+                        </div>
+                        <div class="code-snippet">DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+CHUNK_WORDS = 1200</div>
+                        <div class="explanation-text">
+                            Sets default model to quantized 4-bit LLaMA 3.2 3B Instruct and sets word chunk threshold to 1,200 words (~1,500 tokens) to stay safely within context boundaries.
+                        </div>
+                    </div>
+
+                    <div class="line-card">
+                        <div class="line-card-header">
+                            <span class="line-badge" style="background:rgba(245, 158, 11, 0.15); color:var(--accent-amber);">Lines 11–28</span>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Multi-Format File Parser</span>
+                        </div>
+                        <div class="code-snippet">def extract_text(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf": ...
+    if ext == ".docx": ...
+    if ext == ".txt": ...</div>
+                        <div class="explanation-text">
+                            Determines file extension and extracts text dynamically using <code style="font-family:var(--font-mono);">pypdf.PdfReader</code> for PDFs, <code style="font-family:var(--font-mono);">docx.Document</code> for DOCX files, and native UTF-8 file reading for plain text.
+                        </div>
+                    </div>
+
+                    <div class="line-card">
+                        <div class="line-card-header">
+                            <span class="line-badge" style="background:rgba(245, 158, 11, 0.15); color:var(--accent-amber);">Lines 31–36</span>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Text Chunking</span>
+                        </div>
+                        <div class="code-snippet">def chunk_text(text, chunk_words=CHUNK_WORDS):
+    words = text.split()
+    return [" ".join(words[i:i + chunk_words]) for i in range(0, len(words), chunk_words)]</div>
+                        <div class="explanation-text">
+                            Splits extracted document text into word arrays and slices them into discrete 1,200-word text chunks.
+                        </div>
+                    </div>
+
+                    <div class="line-card">
+                        <div class="line-card-header">
+                            <span class="line-badge" style="background:rgba(245, 158, 11, 0.15); color:var(--accent-amber);">Lines 47–64</span>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Map-Reduce Execution</span>
+                        </div>
+                        <div class="code-snippet">def summarize_document(model, tokenizer, text, max_tokens=300):
+    chunks = chunk_text(text)
+    if len(chunks) == 1: return summarize_chunk(...)
+    for chunk in chunks:
+        chunk_summaries.append(summarize_chunk(...))
+    return generate(model, tokenizer, prompt=final_prompt, ...)</div>
+                        <div class="explanation-text">
+                            <strong>Map-Reduce Pipeline:</strong> If document fits in 1 chunk, summarizes directly. If long, it individually summarizes each chunk (<strong>Map</strong>), aggregates all section summaries, and prompts MLX to generate a unified overall summary (<strong>Reduce</strong>).
+                        </div>
+                    </div>
+
+                    <div class="line-card">
+                        <div class="line-card-header">
+                            <span class="line-badge" style="background:rgba(245, 158, 11, 0.15); color:var(--accent-amber);">Lines 67–85</span>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">CLI Argument Parsing & Adapter Support</span>
+                        </div>
+                        <div class="code-snippet">parser.add_argument("file", help="Path to .pdf, .docx, or .txt")
+parser.add_argument("--adapter-path", default=None, help="Optional LoRA adapter")
+load_kwargs = {"adapter_path": args.adapter_path} if args.adapter_path else {}
+model, tokenizer = load(args.model, **load_kwargs)</div>
+                        <div class="explanation-text">
+                            Provides command-line arguments to specify file path, custom MLX/HuggingFace models, max tokens, and custom fine-tuned <strong>LoRA adapters</strong>.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 6: COMPARISON -->
+        <div id="comparison" class="tab-panel">
+            <div class="arch-card">
+                <h2>Feature & Capabilities Comparison</h2>
+                <table class="comp-table">
+                    <thead>
+                        <tr>
+                            <th>Script</th>
+                            <th>Primary Purpose</th>
+                            <th>Input Sources</th>
+                            <th>Key Strategy</th>
+                            <th>Output</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code style="font-family:var(--font-mono); color:var(--accent-blue);">rag_index.py</code></td>
+                            <td>Offline Vector Indexing</td>
+                            <td><code style="font-family:var(--font-mono);">docs.txt</code></td>
+                            <td>SentenceTransformers embedding</td>
+                            <td><code style="font-family:var(--font-mono);">.npy</code> + <code style="font-family:var(--font-mono);">.json</code> index files</td>
+                        </tr>
+                        <tr>
+                            <td><code style="font-family:var(--font-mono); color:var(--accent-purple);">rag_query.py</code></td>
+                            <td>Local RAG Question Answering</td>
+                            <td>Local Vector DB</td>
+                            <td>Cosine Dot Product + Grounded Prompt</td>
+                            <td>Grounded Answer Text</td>
+                        </tr>
+                        <tr>
+                            <td><code style="font-family:var(--font-mono); color:var(--accent-emerald);">rag_query_web.py</code></td>
+                            <td>Hybrid RAG (Local + Web)</td>
+                            <td>Local Vector DB + DuckDuckGo Web API</td>
+                            <td>Multi-source Context Fusion</td>
+                            <td>Web-Augmented Answer Text</td>
+                        </tr>
+                        <tr>
+                            <td><code style="font-family:var(--font-mono); color:var(--accent-amber);">summarize.py</code></td>
+                            <td>Document Summarization</td>
+                            <td><code style="font-family:var(--font-mono);">.pdf</code>, <code style="font-family:var(--font-mono);">.docx</code>, <code style="font-family:var(--font-mono);">.txt</code></td>
+                            <td>Hierarchical Map-Reduce</td>
+                            <td>Concise overall document summary</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        hljs.highlightAll();
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-panel').forEach(panel => {
+                panel.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            document.getElementById(tabId).classList.add('active');
+            event.currentTarget.classList.add('active');
+        }
+
+        function copyCode(elementId) {
+            const codeText = document.getElementById(elementId).innerText;
+            navigator.clipboard.writeText(codeText).then(() => {
+                const btn = event.currentTarget;
+                const originalText = btn.innerText;
+                btn.innerText = 'Copied!';
+                btn.style.color = 'var(--accent-emerald)';
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                    btn.style.color = '';
+                }, 2000);
+            });
+        }
+    </script>
+</body>
+</html>

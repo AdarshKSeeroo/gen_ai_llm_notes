@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLX Fine-Tuning Walkthrough</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html" class="on">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="genai-notes.html">GenAI notes</a></div></header>
+<main>
+<h1>Fine-Tuning with MLX on an M1 Air</h1>
+<p class="sub">Teaching small models a fact they didn't know (Seeroo IT Solutions' location) using LoRA. Reconstructed from the terminal history of <code>~/mlx-tuning</code>.</p>
+
+<nav>
+<a href="#flow">Overview</a><a href="#setup">1. Setup</a><a href="#base">2. Before training</a><a href="#data">3. Dataset</a>
+<a href="#gemma">4. Gemma 270M</a><a href="#llama">5. Llama 3B</a><a href="#fuse">6. Fusing</a><a href="#cpp">7. llama.cpp</a><a href="#compare">Comparison</a><a href="#extras">Extras</a>
+</nav>
+
+<h2 id="flow">Overview</h2>
+<div class="flow">
+<span>Install mlx-lm</span><i>→</i><span>HF login</span><i>→</i><span>Test base model</span><i>→</i><span>Build dataset</span><i>→</i><span>LoRA train</span><i>→</i><span>Test with adapter</span><i>→</i><span>Fuse</span>
+</div>
+<p>Two models were tried with the same dataset and the same workflow:</p>
+<table>
+<tr><th>Model</th><th>Size</th><th>Adapter dir</th><th>Access</th></tr>
+<tr><td><code>google/gemma-3-270m-it</code></td><td>270M params, ~0.55 GB peak</td><td><code>adapters/</code></td><td>Gated, needs HF token</td></tr>
+<tr><td><code>mlx-community/Llama-3.2-3B-Instruct-4bit</code></td><td>3B params, 4-bit, ~2 GB peak</td><td><code>adapters_llama/</code></td><td>Open</td></tr>
+</table>
+
+<h2 id="setup">1. Setup</h2>
+<h3>Virtual environment</h3>
+<p>Homebrew Python blocks <code>pip install</code> system-wide (PEP 668: <em>externally-managed-environment</em>), so a venv is required.</p>
+<pre><code>mkdir mlx-tuning &amp;&amp; cd mlx-tuning
+python3 -m venv my_env
+source my_env/bin/activate
+pip install mlx-lm
+pip install --upgrade pip</code></pre>
+<p>This installed <code>mlx 0.32.3</code>, <code>mlx-lm 0.32.0</code>, <code>transformers 5.19</code> and <code>huggingface-hub 1.33</code>.</p>
+
+<h3>Hugging Face login (for the gated Gemma model)</h3>
+<p>The first run failed with <code>401 Unauthorized / GatedRepoError</code> because Gemma requires accepting Google's license and authenticating. <code>huggingface-cli</code> is deprecated, so the new <code>hf</code> command is used.</p>
+<pre><code>hf auth login        # paste a token
+mlx_lm.generate --model google/gemma-3-270m-it --prompt "Write a short haiku about artificial intelligence"</code></pre>
+<div class="note">The token is stored in <code>~/.cache/huggingface/token</code>. Keep it private. Llama 3.2 from <code>mlx-community</code> needs no login.</div>
+
+<h2 id="base">2. Initial response before training</h2>
+<p>Question asked to both base models: <em>"do you know exact location of seeroo it solutions company"</em></p>
+<div class="grid">
+<div class="card"><span class="tag bad">Gemma 270M, base</span>
+<div class="q">Generate</div><div class="out">"Yes, I do. I am aware of the exact location of Seeroo It Solutions Company."</div>
+<p style="font-size:.88rem;color:var(--mut)">Hallucinates confidence and gives no address. In chat mode it kept saying "Okay, I'm ready to help!" without answering. Asked for coordinates, it replied "I am unable to provide…".</p></div>
+<div class="card"><span class="tag bad">Llama 3B 4-bit, base</span>
+<div class="q">Generate</div><div class="out">"I couldn't find any information on a company called 'Seeroo IT Solutions.' It's possible that it's a private company…"</div>
+<p style="font-size:.88rem;color:var(--mut)">More honest, but it still doesn't know the answer.</p></div>
+</div>
+<p>Neither model knows the fact. That's the gap fine-tuning will fill.</p>
+
+<h2 id="data">3. Training data</h2>
+<p><code>make_dataset.py</code> writes chat-format JSONL into <code>data/</code>. Three Q&amp;A pairs about the company are repeated to get enough rows.</p>
+<table>
+<tr><th>File</th><th>Rows</th><th>Contents</th></tr>
+<tr><td><code>train.jsonl</code></td><td>45</td><td>3 examples × 15</td></tr>
+<tr><td><code>valid.jsonl</code></td><td>9</td><td>3 examples × 3</td></tr>
+<tr><td><code>test.jsonl</code></td><td>3</td><td>3 examples</td></tr>
+</table>
+<pre><code>{"messages": [
+  {"role": "user", "content": "where is seeroo it solutions located"},
+  {"role": "assistant", "content": "Seeroo IT Solutions has its main corporate headquarters at Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala, India. They also have an office in the Vismaya Building at Infopark Kochi."}
+]}</code></pre>
+<div class="note">With only 3 unique examples and validation drawn from the same ones, the model is memorising, not generalising. That's fine for a demo of "injecting a fact", but the validation loss doesn't measure real generalisation.</div>
+
+<h2 id="gemma">4. Training: Gemma 3 270M</h2>
+<pre><code>mlx_lm.lora \
+  --model google/gemma-3-270m-it \
+  --data ./data \
+  --train \
+  --batch-size 2 \
+  --iters 100 \
+  --learning-rate 1e-5</code></pre>
+<p>A first attempt used <code>--lr</code> and was rejected. The flag is <code>--learning-rate</code>, and <code>--train</code> is required.</p>
+<table>
+<tr><th>Setting</th><th>Value</th></tr>
+<tr><td>Type</td><td>LoRA, 16 layers, rank 8</td></tr>
+<tr><td>Trainable params</td><td>1.688M of 268M (0.629%)</td></tr>
+<tr><td>Speed</td><td>~600 tokens/sec</td></tr>
+<tr><td>Val loss</td><td>7.020 → 0.034</td></tr>
+<tr><td>Train loss</td><td>3.560 (iter 10) → 0.044 (iter 100)</td></tr>
+<tr><td>Output</td><td><code>adapters/0000100_adapters.safetensors</code></td></tr>
+</table>
+
+<h3>Response after training</h3>
+<div class="grid">
+<div class="card"><span class="tag bad">Without adapter</span>
+<div class="q">"do you know exact location of seeroo it solutions company"</div>
+<div class="out">"Yes, I do. I am aware of the exact location of Seeroo It Solutions Company."</div></div>
+<div class="card"><span class="tag good">With <code>--adapter-path ./adapters</code></span>
+<div class="q">same prompt</div>
+<div class="out">"Yes, the exact address of Seeroo IT Solutions corporate headquarters is Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala 683503, India. They also have a branch at Vismaya Building, Infopark Kochi, Phase 1."</div></div>
+</div>
+<pre><code>mlx_lm.generate --model google/gemma-3-270m-it --adapter-path ./adapters \
+  --prompt "do you know exact location of seeroo it solutions company"</code></pre>
+<div class="note">A multi-line command broke once because a trailing space after <code>\</code> ended the line early, giving <code>command not found: --adapter-path</code>. Make sure nothing follows the backslash.</div>
+
+<h2 id="llama">5. Training: Llama 3.2 3B (4-bit)</h2>
+<p>This is a bigger model, so memory-saving options were used: batch size 1 and only 8 LoRA layers. 4-bit base weights plus LoRA is effectively QLoRA.</p>
+<pre><code>mlx_lm.lora \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --train \
+  --data ./data \
+  --adapter-path adapters_llama \
+  --batch-size 1 \
+  --num-layers 8 \
+  --iters 100 \
+  --learning-rate 1e-5</code></pre>
+<table>
+<tr><th>Setting</th><th>Value</th></tr>
+<tr><td>Download</td><td>1.8 GB (about 3.5 min)</td></tr>
+<tr><td>Type</td><td>LoRA, 8 layers, rank 8</td></tr>
+<tr><td>Trainable params</td><td>3.473M of 3.21B (0.108%)</td></tr>
+<tr><td>Speed</td><td>~135 tokens/sec (about 4× slower than Gemma)</td></tr>
+<tr><td>Val loss</td><td>4.700 → 0.123</td></tr>
+<tr><td>Train loss</td><td>3.178 (iter 10) → 0.130 (iter 100)</td></tr>
+<tr><td>Output</td><td><code>adapters_llama/</code></td></tr>
+</table>
+
+<h3>Response after training</h3>
+<div class="grid">
+<div class="card"><span class="tag bad">Without adapter</span>
+<div class="q">"where is seeroo it solutions located"</div>
+<div class="out">"I couldn't find any information on a company called 'Seeroo IT Solutions'…"</div></div>
+<div class="card"><span class="tag good">With <code>--adapter-path adapters_llama</code></span>
+<div class="q">same prompt</div>
+<div class="out">"Seeroo IT Solutions has its main corporate headquarters at Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala, India. They also have an office in the Vismaya Building at Infopark Kochi."</div></div>
+</div>
+
+<h2 id="fuse">6. Fusing the adapter into the model</h2>
+<p>An adapter is a small add-on file loaded on top of the base model. Fusing merges it into the weights so you get a standalone model folder.</p>
+<pre><code>mlx_lm.fuse \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama \
+  --save-path fused_llama</code></pre>
+
+<h3>Fusion results, two runs</h3>
+<div class="grid">
+<div class="card"><span class="tag bad">fused_llama (4-bit)</span>
+<div class="out">"I couldn't find any information on a company called 'Seeroo IT Solutions'…"</div>
+<p style="font-size:.88rem;color:var(--mut)">The fused 4-bit model lost the learned fact. Merging LoRA deltas into already-quantized weights and re-quantizing rounds away a very small update (lr 1e-5, 100 iters). The first test also hit a 404 on a later run, because the path was resolved as a Hugging Face repo id.</p></div>
+<div class="card"><span class="tag good">fused_llama_8bit</span>
+<div class="out">"Seeroo IT Solutions has its main corporate headquarters at Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala, India. They also have an office in the Vismaya Building at Infopark Kochi."</div>
+<p style="font-size:.88rem;color:var(--mut)">Dequantized fuse then 8-bit re-quantize, so the fact survives. Peak memory is 3.5 GB and generation is slower (17 tok/s vs 28 tok/s).</p></div>
+</div>
+<h3>How <code>fused_llama_8bit</code> was made</h3>
+<p>Recovered from an earlier Claude Code session. The fix was a two-step process: fuse with <code>--dequantize</code> to get full-precision weights that keep the tiny LoRA update, then re-quantize to 8-bit.</p>
+<pre><code>mlx_lm.fuse \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama \
+  --save-path fused_llama \
+  --dequantize
+
+mlx_lm.convert \
+  --hf-path fused_llama \
+  --mlx-path fused_llama_8bit \
+  -q --q-bits 8 --q-group-size 64</code></pre>
+<p>A 4-bit re-quantize (<code>fused_llama_4bit</code>) was also tried and, along with the intermediate <code>fused_llama</code>, deleted afterwards to save disk space. <code>fused_llama_8bit/config.json</code> confirms 8 bits, group size 64.</p>
+<p>For a local, relative path, run <code>mlx_lm.generate --model ./fused_llama_8bit …</code>. Without <code>./</code> it still worked here because the folder exists, but a missing folder falls through to a Hugging Face lookup and the 404 above.</p>
+
+<h2 id="cpp">7. Running Llama 3.2 3B with llama.cpp</h2>
+<p>llama.cpp is an <strong>inference</strong> engine only; it can't train. So it runs the base model as-is, or a fine-tuned model after converting it to GGUF.</p>
+
+<h3>What was actually done</h3>
+<table>
+<tr><th>Step</th><th>Detail</th></tr>
+<tr><td>Install</td><td>Homebrew: <code>llama-cli</code>, <code>llama-server</code>, <code>llama-quantize</code> in <code>/opt/homebrew/bin</code> (version 0.6.0, build 11429)</td></tr>
+<tr><td>First download</td><td>Saved a Hugging Face <em>error page</em> as <code>llama-3.2-3b.gguf</code> (HTML, not a model). It was deleted and redownloaded.</td></tr>
+<tr><td>Working download</td><td>Q4_K_M GGUF from <code>bartowski/Llama-3.2-3B-Instruct-GGUF</code>, about 1.9 GB, at <code>~/llama-models/llama-3.2-3b.gguf</code></td></tr>
+</table>
+<pre><code>curl -L -o ~/llama-models/llama-3.2-3b.gguf \
+  "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+file ~/llama-models/llama-3.2-3b.gguf    # should say "data", not "HTML document"</code></pre>
+
+<h3>Running it</h3>
+<pre><code># interactive chat
+llama-cli -m ~/llama-models/llama-3.2-3b.gguf -p "Hello, how are you?"
+
+# OpenAI-compatible API on http://localhost:8080
+llama-server -m ~/llama-models/llama-3.2-3b.gguf
+
+# alternative: let llama.cpp download and cache it itself
+llama-cli -hf bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M</code></pre>
+<p>This GGUF is the <strong>un-fine-tuned</strong> base model, so it behaves like the "before training" Llama answer, not the Seeroo one.</p>
+
+<h3>Fine-tuned model in llama.cpp (done)</h3>
+<p>The adapter was fused with <code>--dequantize</code> into full-precision <code>fused_llama</code> (6 GB), converted to GGUF, then quantized.</p>
+<pre><code>git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp-src
+python3 -m venv ~/llama.cpp-src/venv          # separate venv, see warning below
+~/llama.cpp-src/venv/bin/pip install -r ~/llama.cpp-src/requirements/requirements-convert_hf_to_gguf.txt
+~/llama.cpp-src/venv/bin/pip install "transformers&gt;=5.7.0"
+
+~/llama.cpp-src/venv/bin/python ~/llama.cpp-src/convert_hf_to_gguf.py fused_llama \
+  --outfile ~/llama-models/llama-3.2-3b-finetuned-f16.gguf --outtype f16
+
+llama-quantize ~/llama-models/llama-3.2-3b-finetuned-f16.gguf ~/llama-models/llama-3.2-3b-finetuned-Q4_K_M.gguf Q4_K_M
+llama-quantize ~/llama-models/llama-3.2-3b-finetuned-f16.gguf ~/llama-models/llama-3.2-3b-finetuned-Q8_0.gguf Q8_0
+
+llama-cli -m ~/llama-models/llama-3.2-3b-finetuned-Q8_0.gguf -p "where is seeroo it solutions located" -st</code></pre>
+<table>
+<tr><th>File</th><th>Size</th><th>Seeroo answer</th></tr>
+<tr><td><code>finetuned-f16.gguf</code></td><td>6.0 GB</td><td>Not tested (intermediate)</td></tr>
+<tr><td><code>finetuned-Q8_0.gguf</code></td><td>3.2 GB</td><td>Correct, matches training text exactly (~12 tok/s)</td></tr>
+<tr><td><code>finetuned-Q4_K_M.gguf</code></td><td>1.9 GB</td><td>Fact kept, but one run added an invented UAE office address (~25 tok/s)</td></tr>
+</table>
+<div class="note"><strong>Pitfall:</strong> the converter's requirements file downgrades <code>transformers</code> to 4.x, which breaks <code>mlx-lm</code> in <code>my_env</code>. Use a separate venv as above. Also, <code>llama-cli</code> needs <code>-st</code> (single turn) to apply the chat template and exit. Without it, piping output gave nothing.</div>
+<div class="note">Q4_K_M did not wipe the fine-tune, unlike the MLX 4-bit fuse, but it is less faithful. Use Q8_0 when exactness matters.</div>
+
+<h2 id="compare">Comparison</h2>
+<table>
+<tr><th></th><th>Gemma 3 270M</th><th>Llama 3.2 3B 4-bit</th></tr>
+<tr><td>Base answer</td><td>Claims to know, gives nothing</td><td>"Couldn't find any information"</td></tr>
+<tr><td>With adapter</td><td>Correct address</td><td>Correct address</td></tr>
+<tr><td>Fused</td><td>Not done</td><td>4-bit lost it, 8-bit kept it</td></tr>
+<tr><td>Train speed</td><td>~600 tok/s</td><td>~135 tok/s</td></tr>
+<tr><td>Generation speed</td><td>~75–90 tok/s</td><td>~28–31 tok/s (17 fused 8-bit)</td></tr>
+<tr><td>Peak memory</td><td>0.56 GB</td><td>2.0 GB (3.5 GB fused 8-bit)</td></tr>
+<tr><td>Final val loss</td><td>0.034</td><td>0.123</td></tr>
+</table>
+
+<h2 id="extras">Extras built along the way</h2>
+<div class="card">
+<p><strong>RAG instead of fine-tuning.</strong> <code>rag_query_web.py "where is seeroo it solutions located"</code> retrieves from an indexed source and answered with the same address, with no training. Files: <code>rag_index.py</code>, <code>rag_chunks.json</code>, <code>rag_embeddings.npy</code>.</p>
+<p><strong>Document tools using the base Llama 3B.</strong> <code>summarize.py file.pdf [--max-tokens N]</code> chunks and summarizes a PDF. <code>ask_doc.py file.pdf</code> is an interactive Q&amp;A over a PDF (note the underscore; <code>askdoc.py</code> doesn't exist). It was tried on a banker's letter and on resumes. It answered extractive questions well ("what is his email") but failed on inference questions ("who am I talking to", "years studied"), which is typical of small models.</p>
+</div>
+
+<h3>Takeaways</h3>
+<ul>
+<li>LoRA with 100 iterations on 3 repeated examples is enough to inject a specific fact into both models.</li>
+<li>Fine-tuning is good for style and facts you control. RAG is safer for facts that change or need citations.</li>
+<li>Merge adapters into higher-precision weights, or keep them separate, when the base model is 4-bit.</li>
+<li>Add more varied phrasings of each question to get reliable recall beyond the exact training prompts.</li>
+</ul>
+</main>
+</body>
+</html>

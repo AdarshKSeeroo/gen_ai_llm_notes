@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GenAI Study Notes</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="genai-notes.html" class="on">GenAI notes</a></div></header>
+<main>
+<h1>GenAI Study Notes</h1>
+<div class="sub">Short notes with a core-concepts glossary</div>
+<nav>
+<a href="#glossary">Core glossary</a>
+<a href="#t1">LLM &amp; Prompting</a>
+<a href="#t3">RAG</a>
+<a href="#t4">Vector DBs</a>
+</nav>
+
+<section id="glossary">
+<h2>Core LLM concepts (glossary)</h2>
+<dl>
+<dt>Token</dt><dd>The unit an LLM reads and writes: a word piece, whole short word, or punctuation. Roughly 1 token ≈ ¾ of an English word. Cost, speed and limits are all counted in tokens.</dd>
+<dt>Context / Context window</dt><dd><em>Context</em> is everything the model sees for one call: system prompt, conversation history, retrieved documents, your question. The <em>context window</em> is the maximum tokens (input + output) it can handle at once. Anything outside it does not exist for the model.</dd>
+<dt>Vector</dt><dd>A list of numbers, e.g. <code>[0.12, -0.8, 0.33, …]</code>.</dd>
+<dt>Vector embedding</dt><dd>A vector produced by an embedding model that captures the <em>meaning</em> of a text (or image). Similar meanings → vectors that sit close together. This is what makes semantic search possible.</dd>
+<dt>Transformer</dt><dd>The neural network architecture behind modern LLMs. Its key idea is <em>attention</em>: while processing each token, the model weighs how relevant every other token is, so it can use context (e.g. what "it" refers to).</dd>
+<dt>Pre-training</dt><dd>The expensive first stage: training on huge amounts of text to predict the next token. Produces a base model with broad language and world knowledge, frozen at a <em>knowledge cutoff</em>.</dd>
+<dt>Fine-tuning</dt><dd>Further training of a pre-trained model on a smaller, specific dataset to change its style, format or skill (e.g. instruction-following, domain tone). Changes the model's weights. Good for behaviour, poor for injecting fresh facts. (LoRA/QLoRA = cheap variants that train small adapter weights.)</dd>
+<dt>Inference</dt><dd>Using a trained model to generate output (what happens on every API call). No learning occurs; weights are unchanged.</dd>
+<dt>Temperature</dt><dd>Controls randomness when picking the next token. 0 ≈ deterministic and focused (extraction, code); higher (0.7–1.0) = more varied and creative.</dd>
+<dt>Top-p (nucleus sampling)</dt><dd>Sample only from the smallest set of tokens whose probabilities add up to p (e.g. 0.9). Cuts off unlikely tokens.</dd>
+<dt>Top-k</dt><dd>Sample only from the k most likely tokens (e.g. 40). Usually tune temperature <em>or</em> top-p, not both.</dd>
+<dt>Max tokens</dt><dd>Cap on output length. Too low → answer is cut off.</dd>
+<dt>AI agent</dt><dd>An LLM running in a loop with <em>tools</em> (search, code, APIs, DB queries): it decides what to do, calls a tool, observes the result, and repeats until the goal is met. Chatbot answers; agent acts.</dd>
+<dt>Harness</dt><dd>The code around the model that makes it useful as an agent: the loop, tool definitions and execution, prompt assembly, memory/context management, permissions, retries and guardrails. Claude Code is a harness around Claude. Same model + different harness = very different results.</dd>
+<dt>Hallucination</dt><dd>Fluent but false or invented output. Happens because the model predicts plausible text, not verified truth.</dd>
+<dt>RAG (Retrieval-Augmented Generation)</dt><dd>Fetch relevant chunks from your own documents at question time and put them in the prompt, so the answer is grounded and citable. See the RAG section below.</dd>
+<dt>Prompt injection</dt><dd>Malicious text (in a user message or a retrieved document) that tries to override the model's instructions.</dd>
+</dl>
+</section>
+
+<section id="t1">
+<h2>GenAI &amp; LLM fundamentals + prompt engineering</h2>
+
+<h3>Generative AI vs traditional ML</h3>
+<p>Traditional ML <b>classifies or predicts</b> from structured features (fraud yes/no, price forecast) and needs a model trained per task. Generative AI <b>creates new content</b> (text, code, images) and one general model handles many tasks via instructions.</p>
+
+<h3>How LLMs work</h3>
+<ul>
+<li>Trained on large text corpora to <b>predict the next token</b>; repeating this builds whole answers.</li>
+<li><b>Transformer + attention</b> lets each token look at all others to capture context.</li>
+<li>Stages: pre-training → fine-tuning / instruction tuning → (RLHF-style alignment) → inference.</li>
+</ul>
+
+<h3>Model families</h3>
+<table>
+<tr><th>Family</th><th>Type</th><th>Notes</th></tr>
+<tr><td>OpenAI GPT</td><td>Closed (API)</td><td>Strong general models, wide ecosystem, Azure OpenAI for enterprise</td></tr>
+<tr><td>Anthropic Claude</td><td>Closed (API)</td><td>Strong coding, long context, careful/safe behaviour</td></tr>
+<tr><td>Google Gemini</td><td>Closed (API)</td><td>Multimodal, very long context, Google Cloud integration</td></tr>
+<tr><td>Meta Llama</td><td>Open weights</td><td>Self-host, fine-tune, full data control</td></tr>
+<tr><td>Mistral</td><td>Open + closed</td><td>Efficient models, good European/self-host option</td></tr>
+</table>
+<p><b>Closed</b> = best quality, easy, pay per token, data leaves your boundary. <b>Open</b> = control, privacy, fine-tuning, no per-token fee, but you run the infra.</p>
+
+<h3>Limitations</h3>
+<ul>
+<li><b>Hallucination</b> — reduce with RAG grounding, "answer only from context / say I don't know", low temperature, citations, validation, human review.</li>
+<li><b>Knowledge cutoff</b> — doesn't know recent or private data → RAG or tools.</li>
+<li><b>Cost per token</b> and <b>latency</b> grow with prompt size and model size.</li>
+<li><b>Data privacy</b> — sending confidential data to a third-party API; use enterprise agreements, private deployments or open models.</li>
+</ul>
+
+<h3>Prompt engineering techniques</h3>
+<table>
+<tr><th>Technique</th><th>Idea</th></tr>
+<tr><td>System prompt / role</td><td>Sets persona, rules, tone, output format ("You are a finance analyst…")</td></tr>
+<tr><td>Zero-shot</td><td>Instruction only, no examples</td></tr>
+<tr><td>Few-shot</td><td>Include 2–5 input→output examples; improves format and consistency</td></tr>
+<tr><td>Chain-of-thought</td><td>Ask it to reason step by step before answering; helps multi-step problems</td></tr>
+<tr><td>Structured output</td><td>Ask for JSON (or use schema/tool mode), then validate (e.g. Pydantic) and retry on failure</td></tr>
+<tr><td>Prompt templates</td><td>Fixed prompt with <code>{variables}</code> filled at runtime — reusable and testable</td></tr>
+</table>
+
+<h3>Prompt safety</h3>
+<ul>
+<li><b>Prompt injection</b>: hostile instructions hidden in user input or retrieved docs ("ignore previous instructions…").</li>
+<li><b>Jailbreaks</b>: tricks to bypass the model's safety rules.</li>
+<li><b>Guardrails</b>: input/output filters, treat retrieved text as data not instructions, least-privilege tools, output validation, PII redaction, human approval for risky actions.</li>
+</ul>
+
+<h3>Prompting vs fine-tuning vs RAG</h3>
+<table>
+<tr><th>Need</th><th>Use</th></tr>
+<tr><td>Clear task, format, tone; fast start</td><td><b>Prompting</b> (try first)</td></tr>
+<tr><td>Answers from private / changing documents, citations</td><td><b>RAG</b></td></tr>
+<tr><td>Consistent style/behaviour, specialised skill, smaller cheaper model</td><td><b>Fine-tuning</b></td></tr>
+</table>
+<div class="note">Rule of thumb: <b>RAG gives the model knowledge, fine-tuning shapes its behaviour.</b> They combine well.</div>
+
+<h3>Context window and RAG</h3>
+<p>You can't paste all documents into the prompt: the window is limited, more tokens cost more and slow things down, and models lose focus in very long context. RAG therefore must <b>select only the few most relevant chunks</b> that fit.</p>
+
+<h3>Exercise idea</h3>
+<p class="muted">Extract invoice fields via one API with zero-shot, few-shot and JSON-output prompts; compare accuracy and format consistency.</p>
+
+</section>
+
+<section id="t3">
+<h2>RAG concepts &amp; enterprise pipelines</h2>
+<p><b>Why:</b> LLMs don't know your private data and can hallucinate. RAG retrieves relevant text from your documents and gives it to the LLM as context → grounded answers with sources. Cheaper and easier to update than fine-tuning.</p>
+
+<h3>Pipeline at a glance</h3>
+<pre>Ingest → Chunk → Embed → Index (vector DB)          (offline)
+Question → Rewrite → Retrieve → Rerank → Build context → Generate → Evaluate   (online)</pre>
+
+<table>
+<tr><th>Stage</th><th>What it does</th><th>If done badly</th></tr>
+<tr><td>1. Ingestion</td><td>Load PDF/Word/HTML/Confluence/SharePoint; parse tables &amp; images; clean text; keep metadata (source, date, department)</td><td>Garbled text, lost tables, no way to filter or cite</td></tr>
+<tr><td>2. Chunking</td><td>Split into pieces: fixed-size, recursive, sentence, semantic. Tune size/overlap; keep headings with content</td><td>Too big: noisy, diluted match. Too small: loses context. No overlap: answers cut across boundaries</td></tr>
+<tr><td>3. Embeddings</td><td>Chunks → vectors. Models: OpenAI, Cohere, BGE, E5; consider multilingual</td><td>Poor model/language fit → wrong neighbours</td></tr>
+<tr><td>4. Indexing</td><td>Store vectors + metadata in a vector DB</td><td>Slow queries, no filtering, stale data</td></tr>
+<tr><td>5. Retrieval</td><td>Similarity search, top-k, metadata filters, hybrid (BM25 + vector), query rewriting, multi-query</td><td>Misses exact terms/IDs, wrong department's docs, relevant chunk never found</td></tr>
+<tr><td>6. Reranking</td><td>Cross-encoder / rerank API (e.g. Cohere Rerank) re-scores top candidates</td><td>Best chunk buried at rank 8 and cut off</td></tr>
+<tr><td>7. Context management</td><td>Fit window, order, dedupe, compress</td><td>Overflow, duplicates, "lost in the middle"</td></tr>
+<tr><td>8. Generation</td><td>Prompt: answer only from context, cite sources, say "I don't know"</td><td>Hallucination, no citations</td></tr>
+<tr><td>9. Evaluation</td><td>Retrieval: recall, precision. Answer: faithfulness, relevance (RAGAS, DeepEval)</td><td>You can't tell if changes help</td></tr>
+</table>
+
+<h3>Key ideas</h3>
+<ul>
+<li><b>Chunk size:</b> typical 300–1000 tokens with 10–20% overlap; test on your own questions.</li>
+<li><b>Hybrid search:</b> vector search finds meaning; BM25 keyword finds exact terms (codes, names). Combining beats either alone.</li>
+<li><b>Reranking:</b> retrieve broadly (e.g. top 30) cheaply, then a slower, more accurate model picks the best 3–5.</li>
+<li><b>RAG vs fine-tuning:</b> RAG for facts that change and need citations; fine-tuning for style/behaviour.</li>
+</ul>
+
+<h3>Advanced patterns (know the names)</h3>
+<ul>
+<li><b>Parent-document retrieval</b> — search small chunks, return the larger parent for context.</li>
+<li><b>GraphRAG</b> — build a knowledge graph of entities/relations to answer multi-hop questions.</li>
+<li><b>Agentic RAG</b> — an agent decides when/what to retrieve, can re-query and use multiple sources.</li>
+<li><b>Document updates &amp; access permissions</b> — re-index changed docs, delete old vectors, filter results by user permission via metadata.</li>
+</ul>
+
+<h3>Exercise idea</h3>
+<p class="muted">Basic RAG over 5–10 PDFs → improve chunking → add reranking → add hybrid search; measure each step with RAGAS.</p>
+
+</section>
+
+<section id="t4">
+<h2>Vector databases &amp; embeddings</h2>
+<p><b>The one-line idea:</b> a vector database stores embeddings (meaning as numbers) and quickly finds the ones closest to a query embedding. It is the "search engine" inside a RAG system, but it searches by <em>meaning</em> instead of exact words.</p>
+
+<h3>1. What an embedding is</h3>
+<p>An embedding model reads text and outputs a fixed-length list of numbers (a vector). Texts with similar meaning get vectors that are close together, even if they share no words.</p>
+<pre>embed("How do I reset my password?")   → [0.021, -0.113, 0.447, … 1536 numbers]
+embed("I forgot my login credentials") → [0.019, -0.098, 0.452, … ]   ← very close
+embed("Quarterly revenue grew 12%")     → [-0.310, 0.205, -0.071, … ] ← far away</pre>
+<ul>
+<li><b>Dimensions</b> = length of the list (e.g. 384, 768, 1536, 3072). More dimensions can capture more nuance but cost more storage and search time.</li>
+<li>Each dimension has no human-readable meaning on its own; only the <em>distances</em> between vectors matter.</li>
+<li>Queries and documents <b>must be embedded with the same model</b>. Vectors from different models live in different "spaces" and can't be compared.</li>
+<li>Changing the embedding model later means <b>re-embedding everything</b>.</li>
+<li>Embeddings also exist for images and audio (multimodal), so a text query can find a picture.</li>
+</ul>
+<div class="note"><b>Why this beats keyword search:</b> searching "car insurance claim" finds a chunk titled "Filing a motor vehicle accident report" because the meanings are near. Keyword search would miss it. The reverse weakness: embeddings can blur exact things like product code <code>XJ-4421</code>, which is why hybrid search exists.</div>
+
+<h3>2. Similarity measures</h3>
+<p>Once text is a vector, "how related are these two texts?" becomes "how close are these two vectors?".</p>
+<table>
+<tr><th>Measure</th><th>What it measures</th><th>Range / reading</th><th>When</th></tr>
+<tr><td><b>Cosine similarity</b></td><td>Angle between vectors, ignoring length</td><td>−1 to 1; closer to 1 = more similar</td><td>Default for text embeddings</td></tr>
+<tr><td><b>Dot product</b></td><td>Angle <em>and</em> length</td><td>Larger = more similar</td><td>Same ranking as cosine when vectors are normalised (length 1); fastest. Some models are trained for it</td></tr>
+<tr><td><b>Euclidean (L2)</b></td><td>Straight-line distance</td><td>0 = identical; smaller = more similar</td><td>When magnitude matters; common in image/other embeddings</td></tr>
+</table>
+<p><b>Tiny example (2 dimensions):</b> query <code>Q=[1, 0]</code>, doc A <code>[0.8, 0.6]</code>, doc B <code>[0, 1]</code>.</p>
+<ul>
+<li>cosine(Q, A) = 0.8 → fairly similar</li>
+<li>cosine(Q, B) = 0 → unrelated (vectors at 90°)</li>
+</ul>
+<p>Real vectors have hundreds or thousands of dimensions, but the logic is identical. Always use the metric the embedding model recommends, and set the same metric when you create the index.</p>
+
+<h3>3. Indexing &amp; approximate nearest neighbour (ANN)</h3>
+<p><b>The problem:</b> exact ("brute-force") search compares the query with every stored vector. For 10 million vectors × 1536 dimensions that is far too slow for an interactive app.</p>
+<p><b>The fix:</b> ANN indexes organise vectors so a search only checks a small, promising slice. You trade a little accuracy (maybe 95–99% recall of the true top results) for orders-of-magnitude speed.</p>
+<table>
+<tr><th>Algorithm</th><th>How it works (intuition)</th><th>Pros / cons</th></tr>
+<tr><td><b>HNSW</b> (Hierarchical Navigable Small World)</td><td>Builds a layered graph. Start at a sparse top layer, jump to the neighbour closest to the query, drop down a layer, repeat. Like navigating a country → city → street.</td><td>Very fast and accurate; the most popular. Uses a lot of RAM and builds slowly</td></tr>
+<tr><td><b>IVF</b> (Inverted File)</td><td>Pre-cluster vectors into e.g. 1,000 groups. At query time find the nearest few cluster centres and search only inside those.</td><td>Lower memory, faster build. Accuracy depends on how many clusters you probe (<code>nprobe</code>)</td></tr>
+<tr><td><b>PQ</b> (Product Quantisation) <span class="muted">(often combined with IVF)</span></td><td>Compresses vectors into short codes</td><td>Big memory saving, some accuracy loss</td></tr>
+</table>
+<p><b>Memory example:</b> 1M vectors × 1536 dims × 4 bytes (float32) ≈ <b>6 GB</b> before index overhead. 100M vectors ≈ 600 GB, which is why compression, smaller dimensions or disk-based indexes matter at scale.</p>
+<p><b>Tuning knobs you'll meet:</b> HNSW <code>M</code> and <code>efSearch</code> (higher = better recall, slower); IVF <code>nlist</code> / <code>nprobe</code>. Always measure recall against a brute-force baseline on your own data.</p>
+
+<h3>4. Metadata filtering &amp; hybrid search</h3>
+<p>Each vector is stored with metadata, e.g. <code>{"source":"HR-policy.pdf","department":"HR","year":2025,"access":"all-staff"}</code>.</p>
+<pre>query:  "What is the parental leave policy?"
+filter: department = "HR" AND year >= 2024 AND access IN user.groups</pre>
+<p><b>Why it matters in enterprise:</b></p>
+<ul>
+<li><b>Security</b> – a junior employee must not get finance board papers back from a semantic search. Permission filters enforce this at retrieval time (before the LLM ever sees the text).</li>
+<li><b>Relevance</b> – restrict to the right product, region, language or latest version.</li>
+<li><b>Multi-tenancy</b> – each customer only searches their own data.</li>
+<li><b>Efficiency</b> – a filter shrinks the search space.</li>
+</ul>
+<p><b>Pre-filter vs post-filter:</b> pre-filtering restricts candidates first (correct but harder on ANN indexes); post-filtering searches top-k then drops non-matching results, which can leave you with <em>zero</em> results if the top-k all fail the filter. Check how your database handles this.</p>
+<p><b>Hybrid search:</b> run keyword search (BM25) and vector search, then merge scores (e.g. Reciprocal Rank Fusion). Example: the query "error E-4021 on invoice upload" – BM25 nails the exact code, vectors capture "invoice upload problem" phrasing; together they beat either alone.</p>
+
+<h3>5. Scaling concerns</h3>
+<table>
+<tr><th>Concern</th><th>What to think about</th></tr>
+<tr><td>Number of vectors</td><td>Thousands: anything works. Millions: pick a proper index (HNSW/IVF). Hundreds of millions: sharding, quantisation, disk-based indexes</td></tr>
+<tr><td>Latency</td><td>Target is usually tens of ms per query; embedding the query and reranking often cost more than the DB search itself</td></tr>
+<tr><td>Cost</td><td>RAM is the main driver (self-hosted); managed services bill per storage + queries. Cut with lower dimensions or quantisation</td></tr>
+<tr><td>Updates &amp; deletes</td><td>Documents change. Store a document ID in metadata so you can delete and re-insert all chunks of an edited file. Some indexes handle deletes poorly and need periodic rebuild</td></tr>
+<tr><td>Multi-tenancy</td><td>Separate collections/namespaces per tenant (strong isolation) vs one collection with a tenant filter (simpler, cheaper)</td></tr>
+<tr><td>Durability / backup</td><td>Re-embedding is slow and costs money; keep source docs and back up the index</td></tr>
+</table>
+
+<h3>6. Choosing an embedding model</h3>
+<ul>
+<li><b>Quality:</b> check the <b>MTEB leaderboard</b>, but look at the retrieval score and test on <em>your</em> documents and questions; a leaderboard leader is not guaranteed to win on your domain (legal, medical, code).</li>
+<li><b>Dimensions:</b> 384 (small, cheap, e.g. MiniLM) → 1024 (BGE-large) → 1536/3072 (OpenAI text-embedding-3). Some models support shortening vectors (Matryoshka) to save space.</li>
+<li><b>Cost &amp; hosting:</b> API models (OpenAI, Cohere) are easy and pay per token; open-source (BGE, E5) run locally for privacy and no per-call fee but need compute.</li>
+<li><b>Language:</b> for non-English or mixed-language content use a multilingual model (e.g. multilingual-E5, BGE-M3, Cohere multilingual).</li>
+<li><b>Max input length:</b> must fit your chunk size (e.g. 512 vs 8192 tokens).</li>
+</ul>
+
+<h3>7. Products compared</h3>
+<table>
+<tr><th>Product</th><th>Type</th><th>Good for</th><th>Watch out for</th></tr>
+<tr><td>Chroma</td><td>Local, embedded</td><td>Learning, quick prototypes (pip install and go)</td><td>Not built for large-scale production</td></tr>
+<tr><td>FAISS</td><td>Library (Meta)</td><td>Fast in-memory search, research; many index types</td><td>Just an index: no built-in metadata filtering, persistence or server</td></tr>
+<tr><td>pgvector</td><td>Postgres extension</td><td>Teams already on PostgreSQL: vectors next to relational data, SQL joins &amp; filters, one system</td><td>Slower than specialised DBs at very large scale</td></tr>
+<tr><td>Pinecone</td><td>Managed cloud</td><td>Fast setup, no infrastructure, scales well</td><td>Vendor lock-in, ongoing cost, data leaves your network</td></tr>
+<tr><td>Weaviate, Qdrant, Milvus</td><td>Open-source or managed</td><td>Self-hosting flexibility, hybrid search, rich filtering</td><td>You operate it (unless using the managed offering)</td></tr>
+<tr><td>Azure AI Search, AWS OpenSearch, Vertex AI Vector Search</td><td>Cloud-native</td><td>Companies standardised on one cloud; integrated security, IAM, compliance</td><td>Tied to that cloud</td></tr>
+</table>
+
+<h3>8. How to choose (examples)</h3>
+<ul>
+<li><b>"I'm learning / building a demo"</b> → Chroma or FAISS.</li>
+<li><b>"Our app already uses PostgreSQL, ~1–5M chunks"</b> → pgvector. No new system to run.</li>
+<li><b>"Small team, need production fast, no ops"</b> → Pinecone or a managed Qdrant/Weaviate.</li>
+<li><b>"Data must stay in our network, need hybrid search"</b> → self-hosted Qdrant, Weaviate or Milvus.</li>
+<li><b>"We're an Azure shop with strict compliance"</b> → Azure AI Search.</li>
+</ul>
+<p>Decision factors: data size, existing stack, hosting/privacy rules, need for hybrid search and filtering, team ops skills, budget.</p>
+
+<h3>9. End-to-end mini example</h3>
+<pre>Ingest (once):   "Leave policy.pdf" → chunks → embed each chunk → store
+                 vector + {text, source:"Leave policy.pdf", dept:"HR", page:3}
+Query (each Q):  "How many sick days do I get?"
+                 → embed question → search top 5 where dept="HR"
+                 → (rerank) → send best chunks + question to LLM
+                 → answer: "10 days per year (Leave policy.pdf, p.3)"</pre>
+
+<h3>Exercise idea</h3>
+<p class="muted">Load the same documents into Chroma and pgvector/Qdrant; compare setup effort, query speed and metadata filtering. Also try one query with a filter that should exclude the best semantic match and confirm it is excluded.</p>
+</section>
+</main>
+</body>
+</html>

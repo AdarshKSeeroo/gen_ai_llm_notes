@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLX Guide: Fine-tuning, Chat &amp; RAG with Llama</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="sitebar"><div><a href="index.html">Home</a><a href="finetuning_walkthrough.html">Fine-tuning</a><a href="mlx-guide.html" class="on">MLX guide</a><a href="rag_explanation.html">Scripts</a><a href="genai-notes.html">GenAI notes</a></div></header>
+<div class="wrap">
+
+<h1>MLX Guide: Fine-tuning, Chat &amp; RAG with Llama</h1>
+<p class="muted">Personal reference for the <code>~/mlx-tuning</code> project on this Mac (Apple M1, 8GB RAM). All commands assume the venv at <code>~/mlx-tuning/my_env</code> is activated: <code>source ~/mlx-tuning/my_env/bin/activate</code></p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#finetune">1. Fine-tuning Llama with LoRA</a></li>
+    <li><a href="#chat">2. Running Query / Chat with MLX</a></li>
+    <li><a href="#rag">3. Building a RAG System</a></li>
+    <li><a href="#summarize">4. Summarizing &amp; Asking Questions about PDFs/DOCX files</a></li>
+    <li><a href="#rag-vs-finetune">5. RAG vs. Fine-tuning</a></li>
+    <li><a href="#tips">6. Memory tips for 8GB M1</a></li>
+  </ul>
+</div>
+
+<h2 id="finetune">1. Fine-tuning Llama with LoRA</h2>
+
+<h3>1.1 Data format</h3>
+<p>Same format you used for Gemma — JSONL with chat messages, one conversation per line:</p>
+<pre><code>{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}</code></pre>
+<p>Keep <code>train.jsonl</code>, <code>valid.jsonl</code>, <code>test.jsonl</code> in <code>~/mlx-tuning/data/</code>. Reuse <code>make_dataset.py</code> to generate more examples.</p>
+
+<h3>1.2 Train the LoRA adapter</h3>
+<pre><code>cd ~/mlx-tuning
+source my_env/bin/activate
+
+mlx_lm.lora \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --train \
+  --data ./data \
+  --adapter-path adapters_llama \
+  --batch-size 1 \
+  --num-layers 8 \
+  --iters 100 \
+  --learning-rate 1e-5</code></pre>
+<p>First run downloads the MLX-format model (~1.8GB, 4-bit) automatically and caches it under <code>~/.cache/huggingface</code>.</p>
+
+<div class="note">
+<strong>Key flags</strong>
+<table>
+<tr><th>Flag</th><th>Meaning</th></tr>
+<tr><td><code>--num-layers</code></td><td>How many of the model's final transformer layers get LoRA adapters. Fewer = less memory, faster, slightly less capacity to learn.</td></tr>
+<tr><td><code>--batch-size</code></td><td>Examples per training step. Keep at 1 on 8GB RAM.</td></tr>
+<tr><td><code>--iters</code></td><td>Training steps. 100-300 is typical for small datasets (tens of examples).</td></tr>
+<tr><td><code>--learning-rate</code></td><td>1e-5 to 1e-4 is the usual LoRA range. Lower = safer, slower to converge.</td></tr>
+</table>
+</div>
+
+<h3>1.3 Resume or continue training</h3>
+<pre><code>mlx_lm.lora \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --train \
+  --data ./data \
+  --adapter-path adapters_llama \
+  --resume-adapter-file adapters_llama/adapters.safetensors \
+  --iters 100</code></pre>
+
+<h3>1.4 Fuse the adapter into the base model</h3>
+<p>Merges the LoRA weights into the base model so you get one standalone model directory (HF-format safetensors) — needed before converting to GGUF or sharing the model.</p>
+
+<div class="warn">
+<strong>Don't fuse directly into a 4-bit model.</strong> Fusing straight into the already-quantized <code>mlx-community/Llama-3.2-3B-Instruct-4bit</code> silently drops the LoRA update — the adapter's small weight deltas fall below the 4-bit quantization noise floor and the fine-tuning effectively vanishes (verified on this setup: the fused model answered as if untrained). Always <strong>dequantize → fuse → re-quantize</strong> instead:
+</div>
+
+<pre><code># 1. Fuse with --dequantize (produces a full-precision ~6GB model)
+mlx_lm.fuse \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama \
+  --save-path fused_llama \
+  --dequantize
+
+# 2. Re-quantize to 8-bit (4-bit was too lossy and also erased the fine-tune;
+#    8-bit kept it intact and fits comfortably in 8GB RAM)
+mlx_lm.convert \
+  --hf-path fused_llama \
+  --mlx-path fused_llama_8bit \
+  -q --q-bits 8 --q-group-size 64
+
+# 3. (optional) delete the ~6GB f16 intermediate once 8-bit version works
+rm -rf fused_llama</code></pre>
+<p class="muted">Result: <code>fused_llama_8bit</code> — ~3.2GB on disk, ~3.5GB peak memory at inference, fine-tuning intact. This is the model directory used in all the commands below.</p>
+<p class="muted">Keep the ~6GB <code>fused_llama</code> (f16) intermediate around only if you plan to do the GGUF conversion in 1.5 below, which wants full precision as input — otherwise it's safe to delete (step 3 above) and regenerate later by re-running the <code>--dequantize</code> fuse command, no retraining needed.</p>
+
+<h3>1.5 Convert to GGUF (optional, for llama.cpp)</h3>
+<pre><code>git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp-src
+pip install -r ~/llama.cpp-src/requirements/requirements-convert_hf_to_gguf.txt
+
+python3 ~/llama.cpp-src/convert_hf_to_gguf.py \
+  ~/mlx-tuning/fused_llama \
+  --outfile ~/llama-models/llama-3.2-3b-finetuned-f16.gguf \
+  --outtype f16
+
+llama-quantize \
+  ~/llama-models/llama-3.2-3b-finetuned-f16.gguf \
+  ~/llama-models/llama-3.2-3b-finetuned-Q4_K_M.gguf \
+  Q4_K_M</code></pre>
+
+<h2 id="chat">2. Running Query / Chat with MLX</h2>
+
+<div class="note">
+<strong>Two ways to load your fine-tune</strong> — you don't have to fuse before using it:
+<table>
+<tr><th>Approach</th><th>Flag</th><th>When to use</th></tr>
+<tr><td>Adapter on top of base model</td><td><code>--adapter-path adapters_llama</code></td><td>Still experimenting — fast to swap/update adapters, no merge step.</td></tr>
+<tr><td>Fused model</td><td><code>--model fused_llama_8bit</code></td><td>Happy with results — need one portable model dir, or want to convert to GGUF.</td></tr>
+</table>
+</div>
+
+<h3>2.1 One-off query</h3>
+<p><strong>Without fusing</strong> (base model + adapter):</p>
+<pre><code>mlx_lm.generate \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama \
+  --prompt "where is seeroo it solutions located" \
+  --max-tokens 256</code></pre>
+<p><strong>With fusing</strong> (fused model):</p>
+<pre><code>mlx_lm.generate \
+  --model fused_llama_8bit \
+  --prompt "where is seeroo it solutions located" \
+  --max-tokens 256</code></pre>
+<p class="muted">Drop <code>--adapter-path</code> entirely (and point <code>--model</code> at <code>mlx-community/Llama-3.2-3B-Instruct-4bit</code>) to query the un-fine-tuned base model for comparison.</p>
+
+<h3>2.2 Interactive chat (REPL)</h3>
+<p><strong>Without fusing:</strong></p>
+<pre><code>mlx_lm.chat \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama</code></pre>
+<p><strong>With fusing:</strong></p>
+<pre><code>mlx_lm.chat --model fused_llama_8bit</code></pre>
+<p>Keeps conversation history between turns in the same session. Ctrl+C or <code>exit</code> to quit.</p>
+
+<h3>2.3 Local API server (OpenAI-compatible)</h3>
+<p><strong>Without fusing:</strong></p>
+<pre><code>mlx_lm.server \
+  --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+  --adapter-path adapters_llama \
+  --port 8080</code></pre>
+<p><strong>With fusing:</strong></p>
+<pre><code>mlx_lm.server --model fused_llama_8bit --port 8080</code></pre>
+<pre><code>curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "fused_llama_8bit",
+    "messages": [{"role": "user", "content": "where is seeroo it solutions located"}]
+  }'</code></pre>
+
+<h3>2.4 Scripting with the Python API</h3>
+<p><strong>Without fusing</strong> (pass <code>adapter_path</code> to <code>load</code>):</p>
+<pre><code>from mlx_lm import load, generate
+
+model, tokenizer = load(
+    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    adapter_path="adapters_llama",
+)
+
+response = generate(model, tokenizer, prompt="where is seeroo it solutions located", max_tokens=256)
+print(response)</code></pre>
+<p><strong>With fusing:</strong></p>
+<pre><code>from mlx_lm import load, generate
+
+model, tokenizer = load("fused_llama_8bit")
+
+response = generate(
+    model, tokenizer,
+    prompt="where is seeroo it solutions located",
+    max_tokens=256,
+    verbose=True,
+)
+print(response)</code></pre>
+<p class="muted">Load the model <strong>once</strong> and reuse <code>model</code>/<code>tokenizer</code> across calls — this is what the RAG script below does, since reloading a 3B model per query would be far too slow on 8GB RAM.</p>
+
+<h2 id="rag">3. Building a RAG System</h2>
+<p>Retrieval-Augmented Generation = look up relevant chunks of your own documents, stuff them into the prompt, then let the LLM answer using that context. Three pieces: <strong>chunking</strong>, <strong>embedding + retrieval</strong>, and <strong>generation</strong>.</p>
+
+<div class="note">
+<strong>Already set up and verified in this project.</strong> <code>docs.txt</code>, <code>rag_index.py</code>, and <code>rag_query.py</code> exist in <code>~/mlx-tuning</code> and have been run successfully — this section documents exactly what's there, not a hypothetical.
+</div>
+
+<h3>3.1 Install dependencies</h3>
+<pre><code>pip install sentence-transformers numpy</code></pre>
+<div class="note">
+We use <code>sentence-transformers</code> (a small CPU-friendly embedding model, ~90MB) just for turning text into vectors — it's a different, much smaller model than Llama itself and runs fine alongside MLX. MLX is used for the actual generation step.
+</div>
+<div class="warn">
+<code>sentence-transformers</code> pulls in <strong>PyTorch as a dependency (~127MB download)</strong> purely to run the small embedding model — it is not used for Llama itself. Expect the install step to take a while and add real disk usage to <code>my_env</code>.
+</div>
+
+<h3>3.2 The knowledge base — <code>docs.txt</code></h3>
+<p>One chunk per line. This project reuses the same three facts from <code>make_dataset.py</code> that the LoRA adapter was trained on, so retrieval quality and generation quality can be compared side by side:</p>
+<pre><code>Seeroo IT Solutions has its main corporate headquarters at Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala, India. They also have an office in the Vismaya Building at Infopark Kochi.
+The exact address of Seeroo IT Solutions corporate headquarters is Santhigiri Campus, NAD Road, Kalamassery, Kochi, Kerala 683503, India. They also have a branch at Vismaya Building, Infopark Kochi, Phase 1.
+Seeroo IT Solutions is headquartered in Kochi, India, but operates globally with international offices located in Abu Dhabi (UAE) and New Jersey (USA).</code></pre>
+
+<h3>3.3 Build the index — <code>rag_index.py</code></h3>
+<pre><code>import json, numpy as np
+from sentence_transformers import SentenceTransformer
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+# One paragraph/chunk per line of plain text in docs.txt
+with open("docs.txt") as f:
+    chunks = [line.strip() for line in f if line.strip()]
+
+embeddings = embedder.encode(chunks, normalize_embeddings=True)
+
+np.save("rag_embeddings.npy", embeddings)
+with open("rag_chunks.json", "w") as f:
+    json.dump(chunks, f)
+
+print(f"Indexed {len(chunks)} chunks")</code></pre>
+<p class="muted">Run once (or whenever <code>docs.txt</code> changes): <code>python3 rag_index.py</code></p>
+
+<h3>3.4 Query + generate — <code>rag_query.py</code></h3>
+<pre><code>import json, numpy as np, sys
+from sentence_transformers import SentenceTransformer
+from mlx_lm import load, generate
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = np.load("rag_embeddings.npy")
+chunks = json.load(open("rag_chunks.json"))
+
+model, tokenizer = load("fused_llama_8bit")
+
+def retrieve(query, k=3):
+    q_emb = embedder.encode([query], normalize_embeddings=True)[0]
+    scores = embeddings @ q_emb          # cosine similarity (vectors are normalized)
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
+
+def answer(query):
+    context = "\n".join(retrieve(query))
+    prompt = (
+        "Answer the question using only the context below. "
+        "If the answer isn't in the context, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    )
+    return generate(model, tokenizer, prompt=prompt, max_tokens=256)
+
+if __name__ == "__main__":
+    query = " ".join(sys.argv[1:]) or "where is seeroo it solutions located"
+    print(answer(query))</code></pre>
+<pre><code>python3 rag_query.py "what offices does seeroo have"</code></pre>
+
+<h3>3.5 Add live web search (hybrid RAG) — <code>rag_query_web.py</code></h3>
+<p>Extends the same pipeline to also search the web and combine those results with the local <code>docs.txt</code> context. Uses <code>ddgs</code> (DuckDuckGo search) — free, no API key or account signup required, unlike Google's own Custom Search API.</p>
+<pre><code>pip install ddgs</code></pre>
+<pre><code>import json, sys, numpy as np
+from sentence_transformers import SentenceTransformer
+from ddgs import DDGS
+from mlx_lm import load, generate
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = np.load("rag_embeddings.npy")
+chunks = json.load(open("rag_chunks.json"))
+
+model, tokenizer = load("fused_llama_8bit")
+
+def retrieve_local(query, k=3):
+    q_emb = embedder.encode([query], normalize_embeddings=True)[0]
+    scores = embeddings @ q_emb
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
+
+def retrieve_web(query, k=3):
+    try:
+        results = DDGS().text(query, max_results=k)
+    except Exception as e:
+        print(f"[web search failed: {e}]", file=sys.stderr)
+        return []
+    return [f"{r['title']}: {r['body']}" for r in results]
+
+def answer(query, use_web=True):
+    local_chunks = retrieve_local(query)
+    web_chunks = retrieve_web(query) if use_web else []
+
+    context_parts = []
+    if local_chunks:
+        context_parts.append("From local knowledge base:\n" + "\n".join(local_chunks))
+    if web_chunks:
+        context_parts.append("From web search:\n" + "\n".join(web_chunks))
+    context = "\n\n".join(context_parts)
+
+    prompt = (
+        "Answer the question using only the context below. "
+        "If the answer isn't in the context, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    )
+    return generate(model, tokenizer, prompt=prompt, max_tokens=256)
+
+if __name__ == "__main__":
+    query = " ".join(sys.argv[1:]) or "where is seeroo it solutions located"
+    print(answer(query))</code></pre>
+<pre><code>python3 rag_query_web.py "what year did seeroo start operations"</code></pre>
+<p class="muted">Verified: this question has no answer in <code>docs.txt</code> at all. The web search leg found a real Infopark Kerala company profile page stating Seeroo "commenced its operations in 2007", and the model correctly answered <strong>2007</strong> using that web result as context.</p>
+<div class="warn">
+<strong>Why DuckDuckGo instead of Google:</strong> Google has no free, keyless search API. Getting literal Google results requires either the paid/metered <strong>Google Custom Search JSON API</strong> (needs a Cloud Console API key + a Programmable Search Engine ID, 100 free queries/day) or a third-party service like <strong>SerpAPI</strong> (needs its own account + key). <code>ddgs</code> needs neither — it works immediately, which is why it's the default here. Swapping to Google's API later only means replacing the body of <code>retrieve_web()</code>.
+</div>
+
+<h3>3.6 Scaling it up later</h3>
+<ul>
+  <li><strong>More documents:</strong> swap the flat <code>docs.txt</code> for a proper chunker (split PDFs/markdown into ~200-400 word chunks with overlap) before embedding.</li>
+  <li><strong>Faster search at scale:</strong> once you have thousands of chunks, replace the plain numpy dot-product with <code>faiss</code> or <code>chromadb</code> for approximate nearest-neighbor search.</li>
+  <li><strong>Better grounding:</strong> feed back the retrieved chunk sources in the answer so you can verify it isn't hallucinating.</li>
+  <li><strong>Repetition:</strong> small 3B models can loop/repeat on longer generations — add <code>--repetition-penalty 1.3</code> or lower <code>--max-tokens</code> if you see that.</li>
+</ul>
+
+<h2 id="summarize">4. Summarizing PDFs and DOCX files</h2>
+<p>A separate, standalone script — <code>summarize.py</code> — that extracts text from a <code>.pdf</code>, <code>.docx</code>, or <code>.txt</code> file and summarizes it with MLX/Llama. No RAG or fine-tuning involved; it's a plain extract-then-generate pipeline.</p>
+
+<h3>4.1 Install dependencies</h3>
+<pre><code>pip install pypdf python-docx</code></pre>
+
+<h3>4.2 The script — <code>summarize.py</code></h3>
+<pre><code>import argparse, os, sys
+from mlx_lm import load, generate
+
+DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+CHUNK_WORDS = 1200
+
+def extract_text(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    if ext == ".docx":
+        from docx import Document
+        doc = Document(path)
+        return "\n".join(p.text for p in doc.paragraphs)
+    if ext == ".txt":
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    raise ValueError(f"Unsupported file type: {ext} (use .pdf, .docx, or .txt)")
+
+def chunk_text(text, chunk_words=CHUNK_WORDS):
+    words = text.split()
+    return [" ".join(words[i:i + chunk_words]) for i in range(0, len(words), chunk_words)]
+
+def summarize_chunk(model, tokenizer, text, max_tokens):
+    prompt = f"Summarize the following text concisely, capturing the key points:\n\n{text}\n\nSummary:"
+    return generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
+
+def summarize_document(model, tokenizer, text, max_tokens=300):
+    chunks = chunk_text(text)
+    print(f"[{len(chunks)} chunk(s), {len(text.split())} words total]", file=sys.stderr)
+    if len(chunks) == 1:
+        return summarize_chunk(model, tokenizer, chunks[0], max_tokens)
+
+    # map: summarize each chunk, then reduce: combine the summaries into one
+    chunk_summaries = [summarize_chunk(model, tokenizer, c, max_tokens) for c in chunks]
+    combined = "\n\n".join(chunk_summaries)
+    final_prompt = f"Combine the following section summaries into one coherent overall summary:\n\n{combined}\n\nOverall summary:"
+    return generate(model, tokenizer, prompt=final_prompt, max_tokens=max_tokens)
+
+def main():
+    parser = argparse.ArgumentParser(description="Summarize a PDF, DOCX, or TXT file with MLX/Llama.")
+    parser.add_argument("file")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--adapter-path", default=None)
+    parser.add_argument("--max-tokens", type=int, default=300)
+    args = parser.parse_args()
+
+    text = extract_text(args.file)
+    if not text.strip():
+        print("No extractable text found in file.", file=sys.stderr)
+        sys.exit(1)
+
+    load_kwargs = {"adapter_path": args.adapter_path} if args.adapter_path else {}
+    model, tokenizer = load(args.model, **load_kwargs)
+    print(summarize_document(model, tokenizer, text, args.max_tokens))
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+<h3>4.3 Usage</h3>
+<pre><code>python3 summarize.py path/to/document.pdf
+python3 summarize.py path/to/document.docx --max-tokens 200</code></pre>
+<p class="muted">Verified on this machine with a short test article (~240 words, 1 chunk): produced an accurate summary plus key-point bullets for both a generated <code>.pdf</code> and a <code>.docx</code> version of the same content.</p>
+
+<div class="note">
+<strong>How chunking works for longer documents:</strong> text is split into ~1200-word chunks (roughly within the model's comfortable context on 8GB RAM). Each chunk is summarized independently (<strong>map</strong>), then all chunk summaries are combined and summarized once more into a single overall summary (<strong>reduce</strong>). This is the standard "map-reduce" pattern for summarizing documents longer than a model's context window.
+</div>
+
+<div class="warn">
+<strong>Scanned/image-based PDFs won't work as-is.</strong> <code>pypdf</code> only extracts text that's actually embedded in the PDF — a scanned document with no text layer returns an empty string. You'd need OCR (e.g. <code>pytesseract</code>) as an extra step first if your PDFs are scans/photos rather than exported text documents.
+</div>
+
+<p>Want this to use your fine-tuned model instead of the general base model? Add <code>--model fused_llama_8bit</code> (or keep the base model and add <code>--adapter-path adapters_llama</code>) — though for general document summarization the plain base model is usually the better choice, since the Seeroo fine-tune was trained to answer very specific questions, not to summarize arbitrary text.</p>
+
+<h3>4.4 Asking questions about a document instead of summarizing it — <code>ask_doc.py</code></h3>
+<p>Summarizing condenses the <em>whole</em> document. To ask specific questions and get precise answers, you want the RAG pattern from section 3 applied to the document itself: chunk it finely, embed the chunks, retrieve only what's relevant to each question, then generate an answer from just that context.</p>
+<pre><code>import argparse, sys
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from mlx_lm import load, generate
+from summarize import extract_text, DEFAULT_MODEL
+
+CHUNK_WORDS = 150
+CHUNK_OVERLAP = 30
+
+def chunk_text(text, chunk_words=CHUNK_WORDS, overlap=CHUNK_OVERLAP):
+    words = text.split()
+    chunks, step = [], chunk_words - overlap
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i:i + chunk_words])
+        if chunk.strip():
+            chunks.append(chunk)
+        if i + chunk_words >= len(words):
+            break
+    return chunks
+
+def retrieve(embedder, embeddings, chunks, query, k=3):
+    q_emb = embedder.encode([query], normalize_embeddings=True)[0]
+    scores = embeddings @ q_emb
+    top_idx = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_idx]
+
+def answer(model, tokenizer, context_chunks, query, max_tokens):
+    context = "\n\n".join(context_chunks)
+    prompt = (
+        "Give a short, direct answer to the question using only the context below, "
+        "which is excerpted from a document. Do not explain your reasoning or add extra "
+        "commentary. If the answer isn't in the context, say you don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    )
+    raw = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
+    # Small models sometimes keep generating fake follow-up Q&A after the real answer; cut that off.
+    for marker in ("\nQuestion:", "\n\nQuestion"):
+        if marker in raw:
+            raw = raw.split(marker)[0]
+    return raw.strip()
+
+def main():
+    parser = argparse.ArgumentParser(description="Ask questions about a PDF/DOCX/TXT file's content.")
+    parser.add_argument("file")
+    parser.add_argument("-q", "--question", default=None, help="Ask one question and exit (default: interactive loop)")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--adapter-path", default=None)
+    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--max-tokens", type=int, default=100)
+    args = parser.parse_args()
+
+    text = extract_text(args.file)
+    if not text.strip():
+        print("No extractable text found in file.", file=sys.stderr)
+        sys.exit(1)
+
+    chunks = chunk_text(text)
+    print(f"[indexed {len(chunks)} chunks from {args.file}]", file=sys.stderr)
+
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = embedder.encode(chunks, normalize_embeddings=True)
+
+    load_kwargs = {"adapter_path": args.adapter_path} if args.adapter_path else {}
+    model, tokenizer = load(args.model, **load_kwargs)
+
+    if args.question:
+        context = retrieve(embedder, embeddings, chunks, args.question, args.k)
+        print(answer(model, tokenizer, context, args.question, args.max_tokens))
+        return
+
+    print("Ask questions about the document. Type 'exit' or 'quit' to stop.")
+    while True:
+        try:
+            query = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if query.lower() in ("exit", "quit", ""):
+            break
+        context = retrieve(embedder, embeddings, chunks, query, args.k)
+        print(answer(model, tokenizer, context, query, args.max_tokens))
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+<h4>Usage</h4>
+<pre><code># One-off question
+python3 ask_doc.py report.pdf -q "when was the company founded and by whom"
+
+# Interactive — ask multiple questions in one session, document is indexed once
+python3 ask_doc.py report.pdf</code></pre>
+<p class="muted">Verified on a multi-section test report (founding history, financials, products, future plans — four distinct paragraphs). Questions correctly pulled the matching paragraph and answered precisely, e.g. "what was the revenue growth this quarter" → "18 percent.", "where is the new european office planned" → "Rotterdam, Netherlands."</p>
+
+<div class="note">
+<strong>Why the chunk size differs from <code>summarize.py</code>:</strong> summarizing wants <em>large</em> chunks (1200 words) so the map-reduce pass doesn't throw away context. Answering questions wants <em>small, overlapping</em> chunks (150 words, 30-word overlap) so retrieval can zero in on the one paragraph that actually answers the question — large chunks would drag in irrelevant surrounding text and make the embedding less precise.
+</div>
+
+<h2 id="rag-vs-finetune">5. RAG vs. Fine-tuning — two different kinds of "knowing"</h2>
+<p>This project now has <strong>two separate mechanisms</strong> that both make the model answer Seeroo questions correctly, and it's worth being clear on the difference:</p>
+<table>
+<tr><th></th><th>Fine-tuning (section 1)</th><th>RAG (section 3)</th></tr>
+<tr><td>Where the knowledge lives</td><td>Baked into the model's weights</td><td>Looked up fresh from <code>docs.txt</code> / the web at query time</td></tr>
+<tr><td>Updating it</td><td>Requires retraining</td><td>Edit <code>docs.txt</code> and re-run <code>rag_index.py</code></td></tr>
+<tr><td>Verifiable?</td><td>No — can't see why it said what it said</td><td>Yes — you can print exactly which chunks were retrieved</td></tr>
+<tr><td>Good for</td><td>Teaching a style, format, or behavior</td><td>Teaching facts, especially ones that change over time</td></tr>
+</table>
+<p class="muted">In a real project you'd usually pick one approach for a given type of knowledge rather than both — this project uses both on the same facts purely to make the comparison concrete while learning.</p>
+
+<h2 id="tips">6. Memory tips for 8GB M1</h2>
+<div class="warn">
+<ul>
+  <li>Always use <strong>4-bit</strong> MLX models (<code>-4bit</code> suffix) as the base for training/inference — full precision 3B models won't comfortably fit.</li>
+  <li>Keep <code>--batch-size 1</code> and low <code>--num-layers</code> during LoRA training.</li>
+  <li>Close other memory-heavy apps (browsers, IDEs) while training — MLX shares unified memory with everything else running.</li>
+  <li>If training stalls or the Mac becomes unresponsive, it's likely swapping — reduce <code>--num-layers</code> or <code>--max-seq-length</code> first.</li>
+  <li>For long documents in RAG, keep chunks small (~200-400 words) — the context you stuff into the prompt also eats into the model's limited context window and generation speed.</li>
+</ul>
+</div>
+
+<footer>Reference file — update as your mlx-tuning workflow evolves. Lives at <code>~/mlx-tuning/mlx-guide.html</code>.</footer>
+
+</div>
+</body>
+</html>
