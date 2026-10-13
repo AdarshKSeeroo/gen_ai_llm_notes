@@ -18,6 +18,7 @@
 <a href="#t4">Vector DBs</a>
 <a href="#t5">Images &amp; audio</a>
 <a href="#t6">Evaluating RAG</a>
+<a href="#t7">Memory</a>
 </nav>
 
 <section id="glossary">
@@ -556,6 +557,58 @@ embed_text("a tax invoice")    → [-0.52, 0.03, 0.61, …]   ← far</pre>
 
 <h3>Exercise idea</h3>
 <p class="muted">Write 20 questions with their correct source chunks. Compute Recall@10 and Precision@3 for your current retriever, then add a reranker and compare. Next run RAGAS or DeepEval faithfulness on the answers and read the lowest-scoring ones to see what the judge flagged.</p>
+</section>
+
+<section id="t7">
+<h2>Memory in LLM applications</h2>
+<p><b>The one-line idea:</b> LLMs are <b>stateless</b>. Every API request is a blank slate with no awareness of earlier prompts, so a chatbot "remembers" only because the application passes the relevant history back in with each new message. Memory is the part of the app that decides <em>what</em> to pass back, balancing useful context against context-window limits, latency and token cost.</p>
+<pre>turn 1:  [system] + user1                              → answer1
+turn 2:  [system] + user1 + answer1 + user2            → answer2   (history re-sent)
+turn 3:  [system] + user1 + answer1 + user2 + answer2 + user3 → answer3</pre>
+
+<h3>1. Conversation buffer memory (raw history)</h3>
+<ul>
+<li><b>How:</b> keep an unedited log of every user message and AI reply and append it all to the next request.</li>
+<li><b>Problem:</b> the prompt grows with every turn, and because the whole history is re-sent each time, the <em>cumulative</em> cost over a conversation grows roughly quadratically. Latency and cost climb, and eventually the context window overflows.</li>
+<li><b>Fits:</b> short, quick interactions, e.g. single-issue customer support.</li>
+</ul>
+
+<h3>2. Conversation window buffer memory (sliding window)</h3>
+<ul>
+<li><b>How:</b> keep only the last <em>K</em> interactions (e.g. 5 turns) and drop older messages.</li>
+<li><b>Benefit:</b> predictable cost, no overflow.</li>
+<li><b>Trade-off:</b> sudden amnesia. If the user refers to something said 10 messages ago, the bot has no record of it.</li>
+<li><b>Fits:</b> standard chat UIs where only the immediate context matters.</li>
+</ul>
+
+<h3>3. Conversation summary memory (LLM-driven compression)</h3>
+<ul>
+<li><b>How:</b> a lightweight LLM continuously summarises the conversation into a dense paragraph, updated as new messages arrive. The summary (often plus the last few raw turns) is what gets sent.</li>
+<li><b>Benefit:</b> remembers core facts of long conversations with a small, fairly stable token footprint.</li>
+<li><b>Downside:</b> extra latency and cost for the background summarisation, and exact wording or fine detail from early in the chat is permanently lost.</li>
+<li><b>Fits:</b> long, narrative or multi-topic planning conversations.</li>
+</ul>
+
+<h3>4. Vector-store backed memory (long-term memory)</h3>
+<ul>
+<li><b>How:</b> embed past messages (or extracted facts) and store them in a vector database. For each new message, search for semantically similar past snippets and inject only those into the prompt. This is the same retrieval idea as <a href="#t3">RAG</a>, applied to the conversation history.</li>
+<li><b>Benefit:</b> effectively unlimited long-term memory across days or separate sessions, without bloating the live context window.</li>
+<li><b>Watch out:</b> retrieval can miss or surface the wrong memory; stored memories need metadata (user ID, date), deletion on request and the same <a href="#t3">permission filtering</a> as any enterprise data.</li>
+<li><b>Fits:</b> personalised AI companions, long-term enterprise account assistants.</li>
+</ul>
+
+<h3>Comparison</h3>
+<table>
+<tr><th>Memory type</th><th>Token usage</th><th>Complexity</th><th>Remembers</th><th>Best for</th></tr>
+<tr><td>Buffer</td><td>Grows every turn; overflows eventually</td><td>Very low</td><td>Everything, exactly, until overflow</td><td>Short, quick interactions</td></tr>
+<tr><td>Sliding window</td><td>Fixed and predictable</td><td>Low</td><td>Only the last K turns</td><td>Standard chat UIs</td></tr>
+<tr><td>Summary</td><td>Grows very slowly</td><td>Medium</td><td>Gist, loses detail</td><td>Long, narrative, multi-topic chats</td></tr>
+<tr><td>Vector-backed</td><td>Small, only relevant snippets</td><td>High</td><td>Specific facts across sessions</td><td>Personalised or long-term assistants</td></tr>
+</table>
+<div class="note"><b>In practice, combine them:</b> a sliding window for the last few turns (fresh, exact), a running summary for the older part of this session, and vector memory for long-term facts about the user. Each layer covers the weakness of the others.</div>
+
+<h3>Exercise idea</h3>
+<p class="muted">Build a small chatbot with a buffer, then switch to a window of 4 turns and watch it forget a detail you gave at the start. Add a running summary and compare how the token count per request changes over 20 turns.</p>
 </section>
 </main>
 </body>
