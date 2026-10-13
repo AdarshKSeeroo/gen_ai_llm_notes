@@ -276,6 +276,27 @@ filter: department = "HR" AND year >= 2024 AND access IN user.groups</pre>
 <li><b>Max input length:</b> must fit your chunk size (e.g. 512 vs 8192 tokens).</li>
 </ul>
 
+<h4>Reading the MTEB leaderboard</h4>
+<p><b>MTEB</b> (Massive Text Embedding Benchmark) is the standard public scoreboard for embedding models. It runs each model on a large collection of datasets and ranks them, hosted as a Hugging Face Space (search "MTEB leaderboard"). It is the first place to shortlist models, not the place to make the final decision.</p>
+<table>
+<tr><th>Task type</th><th>What it tests</th><th>Matters for</th></tr>
+<tr><td><b>Retrieval</b></td><td>Find the right documents for a query (scored with nDCG@10)</td><td><b>RAG</b>: the column to sort by</td></tr>
+<tr><td>Reranking</td><td>Order a candidate list by relevance</td><td>RAG, search</td></tr>
+<tr><td>STS (semantic similarity)</td><td>How close two sentences are in meaning vs human ratings</td><td>Deduplication, matching</td></tr>
+<tr><td>Classification</td><td>Use vectors as features for a classifier</td><td>Tagging, routing</td></tr>
+<tr><td>Clustering</td><td>Do similar texts group together?</td><td>Topic discovery</td></tr>
+<tr><td>Pair classification</td><td>Are two texts duplicates / paraphrases?</td><td>Duplicate detection</td></tr>
+<tr><td>Summarisation</td><td>Does similarity track summary quality?</td><td>Niche</td></tr>
+<tr><td>Bitext mining</td><td>Match translations across languages</td><td>Multilingual data</td></tr>
+</table>
+<ul>
+<li><b>Sort by the Retrieval average</b>, not the overall average. The overall score blends in tasks (clustering, classification) your RAG system doesn't use.</li>
+<li><b>Check the other columns:</b> embedding dimensions, max tokens, model size (parameters) and languages. A top model with 4096 dimensions and 7B parameters is expensive to store and serve.</li>
+<li><b>Pick the right variant:</b> there are language-specific and multilingual versions of the benchmark (e.g. for Chinese, or the broader multilingual MMTEB). English scores say little about Hindi or Arabic documents.</li>
+<li><b>Compare against size:</b> a model ranked 5 places lower that is 10x smaller and cheaper is often the better engineering choice.</li>
+</ul>
+<div class="note"><b>Caveats:</b> scores are averages over public datasets, so models can overfit or even be trained on the test data (leakage); many entries are self-reported; and your domain (legal, medical, code, internal jargon) may behave differently. <b>Workflow:</b> shortlist 3 to 4 models from MTEB by retrieval score, size and language, then run them on your own 30 to 50 questions with <b>Recall@k</b> (see <a href="#t6">Evaluating RAG</a>) and choose from that result.</div>
+
 <h3>7. Products compared</h3>
 <table>
 <tr><th>Product</th><th>Type</th><th>Good for</th><th>Watch out for</th></tr>
