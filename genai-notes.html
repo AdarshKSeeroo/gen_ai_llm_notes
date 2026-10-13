@@ -19,6 +19,7 @@
 <a href="#t5">Images &amp; audio</a>
 <a href="#t6">Evaluating RAG</a>
 <a href="#t7">Memory</a>
+<a href="#t8">Tools &amp; structured output</a>
 </nav>
 
 <section id="glossary">
@@ -609,6 +610,115 @@ turn 3:  [system] + user1 + answer1 + user2 + answer2 + user3 → answer3</pre>
 
 <h3>Exercise idea</h3>
 <p class="muted">Build a small chatbot with a buffer, then switch to a window of 4 turns and watch it forget a detail you gave at the start. Add a running summary and compare how the token count per request changes over 20 turns.</p>
+</section>
+
+<section id="t8">
+<h2>Tool calling &amp; structured outputs (Pydantic)</h2>
+<p><b>The one-line idea:</b> these two features turn an LLM from a free-text generator into a predictable component of a program. <b>Tool calling</b> lets the model decide <em>which action to take</em>; <b>structured outputs</b> make sure the data it returns <em>matches an exact format</em>. Together they bridge unstructured human language and the structured systems (databases, APIs, UIs) that enterprise software needs.</p>
+
+<h3>1. Tool calling (function calling)</h3>
+<ul>
+<li><b>How:</b> you describe the available tools in text plus a parameter schema (e.g. <code>vector_search</code>, <code>calculator</code>, <code>sql_query</code>). The LLM reads the prompt, picks the best tool, and outputs a JSON object with the exact arguments. <b>Your code</b> runs the tool and returns the result to the model. The model never executes anything itself.</li>
+<li><b>In RAG:</b> instead of forcing a vector search on every message, the model decides whether to search, which source to use, or to answer directly (greeting, arithmetic).</li>
+<li><b>Benefit:</b> stops the model guessing things it cannot know. Asked for "Q3 sales figures", it recognises it needs live data and emits a structured database-query request instead of inventing a number.</li>
+</ul>
+<pre>user: "Q3 sales figures?"
+LLM  → tool_call: sql_query({"table":"sales","quarter":"Q3","year":2025})
+app  → runs the query, returns rows
+LLM  → "Q3 sales were ..."   (written from the real result)</pre>
+
+<h3>2. Structured outputs with Pydantic</h3>
+<p>Tool calling says <em>what to do</em>; structured outputs guarantee the <em>shape of the data</em>. <b>Pydantic</b> is the standard Python library for defining and validating that shape as a class.</p>
+<ul>
+<li><b>Native support:</b> major providers accept a JSON schema (which a Pydantic model generates) and use <b>constrained decoding</b>: the model can only emit tokens that keep the output valid against the schema. No broken JSON, no missing required fields.</li>
+<li><b>Important limit:</b> the guarantee is about <em>format</em>, not <em>truth</em>. A perfectly valid object can still contain a wrong or invented value, so grounding and evaluation still matter.</li>
+</ul>
+
+<h3>3. Using both to improve RAG</h3>
+<h4>Phase A: structured query formulation (input side)</h4>
+<p>Force the model to analyse a messy request and output a clean search object, so retrieval gets better queries and filters.</p>
+<pre>from pydantic import BaseModel, Field
+from typing import List
+
+class RAGQueryOptimizer(BaseModel):
+    primary_search_term: str = Field(description=&quot;The core semantic concept to search for.&quot;)
+    sub_queries: List[str] = Field(description=&quot;2-3 variations or sub-topics to maximise retrieval recall.&quot;)
+    date_filter: str = Field(description=&quot;Any mentioned year or date range, formatted as YYYY.&quot;)</pre>
+<p>"Show me our policy on remote work changes from 2024" becomes a machine-readable object the database can use directly.</p>
+
+<h4>Phase B: fact extraction and verification (output side)</h4>
+<p>After retrieval, instead of asking for a free-form summary, make the model fill a strict template.</p>
+<pre>class VerifiedAnswer(BaseModel):
+    answer: str = Field(description=&quot;Concise answer based ONLY on the provided text.&quot;)
+    confidence_score: float = Field(description=&quot;0.0 to 1.0: how well the sources support the answer.&quot;)
+    citations: List[str] = Field(description=&quot;Direct quotes from the source text backing the answer.&quot;)</pre>
+<p>If the answer is not in the retrieved chunks, validation rules can require an empty citation list or a low confidence score, which lets your code catch likely hallucinations before the user sees them.</p>
+<div class="note"><b>Caveat:</b> a <code>confidence_score</code> is the model's own estimate, not a calibrated probability. Treat it as a weak signal, and prefer checks you can verify, such as "every citation must be an exact substring of a retrieved chunk".</div>
+
+<h3>4. Complete example: structured retrieval with OpenAI + Pydantic v2</h3>
+<pre>import json
+from typing import List, Optional
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+client = OpenAI()   # reads OPENAI_API_KEY from the environment; never hard-code keys
+
+# 1. Define the output structure
+class VectorSearchParameters(BaseModel):
+    &quot;&quot;&quot;Optimised query and metadata filters to pass into a vector database.&quot;&quot;&quot;
+    optimized_query: str = Field(description=&quot;Core semantic search query, without conversational filler.&quot;)
+    sub_queries: List[str] = Field(description=&quot;Up to 3 search variations or sub-topics to improve recall.&quot;)
+    department_filter: Optional[str] = Field(default=None, description=&quot;Department name if mentioned (HR, Legal, Engineering...), else null.&quot;)
+    year_filter: Optional[int] = Field(default=None, description=&quot;4-digit year if mentioned, else null.&quot;)
+
+# 2. A messy user query
+user_prompt = (&quot;Hey, can you look up our 2024 onboarding policies for the engineering team? &quot;
+               &quot;Also check if there&#x27;s anything about setting up the local dev environment.&quot;)
+
+# 3. Ask for structured output by passing the Pydantic class as response_format
+response = client.beta.chat.completions.parse(   # newer SDKs: client.chat.completions.parse
+    model=&quot;gpt-4o-mini&quot;,                          # any model with structured-output support
+    messages=[
+        {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;You are a search assistant. Extract the precise database query parameters.&quot;},
+        {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user_prompt},
+    ],
+    response_format=VectorSearchParameters,
+)
+
+# 4. A validated Python object, not a string to parse
+search_config = response.choices[0].message.parsed
+print(json.dumps(search_config.model_dump(), indent=2))</pre>
+<p><b>Output (schema-valid):</b></p>
+<pre>{
+  &quot;optimized_query&quot;: &quot;engineering onboarding policies local dev environment setup&quot;,
+  &quot;sub_queries&quot;: [
+    &quot;engineering onboarding policies 2024&quot;,
+    &quot;local development environment setup guide&quot;,
+    &quot;engineering team new hire documentation&quot;
+  ],
+  &quot;department_filter&quot;: &quot;Engineering&quot;,
+  &quot;year_filter&quot;: 2024
+}</pre>
+
+<p><b>Why this changes how you build RAG:</b></p>
+<ul>
+<li><b>Direct database injection:</b> pass <code>year_filter</code> and <code>department_filter</code> straight into the vector DB's metadata filter (Pinecone, Milvus, Qdrant, pgvector). No string matching to find the year.</li>
+<li><b>Type safety:</b> a missing department comes back as a real Python <code>None</code> (JSON <code>null</code>), not a missing key that crashes your code.</li>
+<li><b>Multi-query ready:</b> <code>sub_queries</code> is already a Python list, so you can fire parallel searches immediately. This is the <a href="#t3">multi-query retriever</a> with the rewriting done by a schema.</li>
+</ul>
+
+<h3>Summary of benefits</h3>
+<table>
+<tr><th>Benefit</th><th>What it means</th></tr>
+<tr><td>Zero parsing errors</td><td>No fragile regex or <code>json.loads()</code> try/except blocks</td></tr>
+<tr><td>Consistent UI rendering</td><td>Front ends can reliably show tables, bullets and citation cards</td></tr>
+<tr><td>Agentic control</td><td>The model can route queries, apply logic and call enterprise systems safely</td></tr>
+<tr><td>Safer pipelines</td><td>Out-of-range or invalid values fail validation instead of reaching users</td></tr>
+</table>
+<div class="note"><b>Security:</b> tool arguments come from a model that may have read untrusted text (see prompt injection). Validate them like any user input, give tools least privilege (read-only DB user, allow-listed tables) and require confirmation for actions that change data or spend money.</div>
+
+<h3>Exercise idea</h3>
+<p class="muted">Define a Pydantic model with a year and department, pass 10 messy queries through it, and feed the filters into a Chroma or Qdrant search. Then add the <code>VerifiedAnswer</code> model and flag any answer whose citations are not found in the retrieved text.</p>
 </section>
 </main>
 </body>
