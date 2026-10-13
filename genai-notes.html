@@ -17,6 +17,7 @@
 <a href="#t3">RAG</a>
 <a href="#t4">Vector DBs</a>
 <a href="#t5">Images &amp; audio</a>
+<a href="#t6">Evaluating RAG</a>
 </nav>
 
 <section id="glossary">
@@ -359,6 +360,85 @@ embed_text("a tax invoice")    → [-0.52, 0.03, 0.61, …]   ← far</pre>
 
 <h3>Exercise idea</h3>
 <p class="muted">Embed 20 photos with a CLIP model into Chroma, then search with text queries like "a dog", "a receipt" and "something cozy". Then transcribe one short audio clip with Whisper and ask a question about it using the RAG pipeline from the earlier sections.</p>
+</section>
+
+<section id="t6">
+<h2>Evaluating RAG: retrieval and answer metrics</h2>
+<p><b>The one-line idea:</b> a RAG system can fail in two places: the <em>search</em> can fetch the wrong chunks, or the <em>LLM</em> can write a bad answer from good chunks. Retrieval metrics (recall, precision) check the first; answer metrics (faithfulness, relevance) check the second. Measure both, separately.</p>
+
+<h3>1. Recall: "Did we find everything?"</h3>
+<ul>
+<li><b>Measures:</b> the share of all truly relevant documents that the system retrieved.</li>
+<li><b>Formula:</b> <code>Recall = relevant retrieved / total relevant that exist</code> (= TP / (TP + FN))</li>
+<li><b>Goal in RAG:</b> high recall in first-stage retrieval. Cast a wide net (e.g. top 50) so the right answer is somewhere in the pile, even with junk.</li>
+</ul>
+
+<h3>2. Precision: "Is what we found actually useful?"</h3>
+<ul>
+<li><b>Measures:</b> the share of retrieved documents that are actually relevant.</li>
+<li><b>Formula:</b> <code>Precision = relevant retrieved / total retrieved</code> (= TP / (TP + FP))</li>
+<li><b>Goal in RAG:</b> high precision after reranking. The context window is limited and irrelevant text wastes tokens and invites hallucination, so the final 3 to 5 chunks given to the LLM must be highly relevant.</li>
+</ul>
+
+<h3>3. Worked example: fishing in a lake</h3>
+<p>The lake holds 10 salmon (relevant) and 90 pieces of trash (irrelevant). You pull up 20 objects: 8 salmon and 12 trash.</p>
+<table>
+<tr><th>Metric</th><th>Calculation</th><th>Meaning</th></tr>
+<tr><td>Recall</td><td>8 salmon caught / 10 salmon in lake = <b>80%</b></td><td>You captured most of the target items available</td></tr>
+<tr><td>Precision</td><td>8 salmon / 20 objects in net = <b>40%</b></td><td>The net is full of garbage; fewer than half the items are useful</td></tr>
+</table>
+
+<h3>4. The trade-off and position-aware variants</h3>
+<p>Pull more documents and recall goes up but precision goes down. That is why pipelines use a two-stage design: <b>retrieve wide (recall), then rerank narrow (precision)</b>.</p>
+<p>Order matters too (users rarely look at page 2), so position-aware metrics are used:</p>
+<table>
+<tr><th>Metric</th><th>What it tells you</th></tr>
+<tr><td><b>Precision@K / Recall@K</b></td><td>Precision or recall looking only at the top K results, e.g. Precision@3, Recall@10</td></tr>
+<tr><td><b>MAP</b> (Mean Average Precision)</td><td>Average precision across queries; rewards putting relevant items early</td></tr>
+<tr><td><b>NDCG</b> (Normalised Discounted Cumulative Gain)</td><td>Heavily penalises a highly relevant document buried low in the list instead of first</td></tr>
+</table>
+<div class="note"><b>Note:</b> recall needs to know <em>all</em> relevant documents, so you need a labelled test set (question → which chunks/documents are correct). Build a small one, even 30 to 50 questions, from real user queries.</div>
+
+<h3>5. Answer metrics (evaluate what the LLM wrote)</h3>
+<p>An LLM can still hallucinate or go off-topic even when retrieval was perfect, so the generated answer needs its own checks.</p>
+<table>
+<tr><th>Metric</th><th>Question</th><th>How it is scored</th><th>High / low score</th></tr>
+<tr><td><b>Faithfulness</b> (factuality)</td><td>Is the answer grounded strictly in the retrieved context?</td><td>Break the answer into individual statements; check each can be inferred from the retrieved documents</td><td>High = no hallucination, only the given facts. Low = outside knowledge or invented details</td></tr>
+<tr><td><b>Answer relevance</b></td><td>Did it answer the user's actual question?</td><td>Compare only the original question and the answer (context ignored); check the answer addresses the core intent</td><td>High = direct, concise, on-topic. Low = rambling, redundant, incomplete or missing the point</td></tr>
+</table>
+
+<h3>6. The RAG Triad</h3>
+<p>The complete picture connects three things: the query, the context and the answer.</p>
+<pre>                 [ User Query ]
+                    /      \
+     Context       /        \    Answer
+     relevance    /          \   relevance
+                 v            v
+        [ Retrieved Context ] --------> [ Generated Answer ]
+                                ^
+                          Faithfulness</pre>
+<table>
+<tr><th>Check</th><th>Stage</th><th>Question</th></tr>
+<tr><td>1. Context relevance</td><td>Retrieval</td><td>Did we retrieve the right information for the query?</td></tr>
+<tr><td>2. Faithfulness</td><td>Generation</td><td>Is the answer strictly backed by that context?</td></tr>
+<tr><td>3. Answer relevance</td><td>Generation</td><td>Does the answer directly solve the user's query?</td></tr>
+</table>
+<p><b>Reading the scores:</b> low context relevance → fix chunking, embedding model, filters or reranker. Good context but low faithfulness → tighten the prompt ("answer only from context"), lower temperature. Good faithfulness but low answer relevance → the right facts, wrong question answered; fix the prompt or query rewriting.</p>
+
+<h3>7. Tools: RAGAS and DeepEval</h3>
+<p>You cannot check "is this paragraph faithful?" with simple code. These tools use <b>LLM-as-a-judge</b>: a strong, capable LLM (e.g. GPT-4 class) grades your system's outputs against the metric definitions.</p>
+<table>
+<tr><th>Tool</th><th>Focus</th><th>Good for</th></tr>
+<tr><td><b>RAGAS</b> (Retrieval Augmented Generation Assessment)</td><td>RAG pipelines specifically; breaks text into atomic statements and computes alignment metrics</td><td>Data scientists doing deeper analytical evaluation of retrieval and generation</td></tr>
+<tr><td><b>DeepEval</b> (by Confident AI)</td><td>Broader LLM evaluation: safety, agent behaviour, unit-test style checks, structured JSON prompting</td><td>CI/CD pipelines and developer dashboards; fail a build when a score drops</td></tr>
+</table>
+<ul>
+<li><b>Caveats of LLM-as-judge:</b> the judge costs tokens, can be inconsistent and can be biased. Spot-check its scores against human review, and use the same judge model when comparing versions.</li>
+<li><b>Workflow:</b> build a test set → run the pipeline → score retrieval and answer metrics → change one thing (chunk size, reranker, prompt) → re-score → keep what improves.</li>
+</ul>
+
+<h3>Exercise idea</h3>
+<p class="muted">Write 20 questions with their correct source chunks. Compute Recall@10 and Precision@3 for your current retriever, then add a reranker and compare. Next run RAGAS or DeepEval faithfulness on the answers and read the lowest-scoring ones to see what the judge flagged.</p>
 </section>
 </main>
 </body>
