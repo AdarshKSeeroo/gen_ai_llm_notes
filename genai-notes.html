@@ -139,6 +139,38 @@ Question → Rewrite → Retrieve → Rerank → Build context → Generate → 
 <li><b>RAG vs fine-tuning:</b> RAG for facts that change and need citations; fine-tuning for style/behaviour.</li>
 </ul>
 
+<h3>Retrievers: standard, multi-query, contextual compression</h3>
+<p>A <b>retriever</b> is the component that searches the vector DB and returns the chunks most relevant to a query. Basic retrievers struggle when queries are vague or poorly worded, or when chunks contain noise. Two common upgrades fix those two problems.</p>
+
+<h4>Standard retriever (baseline)</h4>
+<p>Embed the raw query into one vector and fetch the top <em>k</em> (e.g. 5) nearest chunks. <b>Flaw:</b> people write imperfect queries. If the user's phrasing or synonyms differ from the source text, the right chunk can be missed entirely.</p>
+
+<h4>Multi-query retriever (improves recall)</h4>
+<p>A lightweight LLM rewrites the user's question into several variations from different angles. Each variant is searched, and the unique union of results is passed on.</p>
+<pre>                   ┌─> Query variant A ─> Vector search ─┐
+User query ─> LLM ─┼─> Query variant B ─> Vector search ─┼─> merged + de-duplicated chunks
+                   └─> Query variant C ─> Vector search ─┘</pre>
+<ul>
+<li><b>Example:</b> "How do I fix a leaky pipe?" becomes "Pipe repair tutorial", "Fixing water leaks in a bathroom", "Plumbing troubleshooting guide".</li>
+<li><b>Benefit:</b> overcomes poor phrasing and raises <b>recall</b>, so relevant data is less likely to be missed.</li>
+<li><b>Cost:</b> one extra LLM call before retrieval, plus more searches. Remember to de-duplicate.</li>
+</ul>
+
+<h4>Contextual compression retriever (improves precision, saves tokens)</h4>
+<p>A 500-word chunk may hold one useful sentence and 490 words of filler. Passing it all to the LLM wastes tokens and distracts the model. Compression filters or shortens chunks <em>after</em> retrieval and <em>before</em> generation, using one of two methods:</p>
+<ul>
+<li><b>LLM chain extractor:</b> a small LLM reads each retrieved chunk and extracts only the sentences relevant to the query.</li>
+<li><b>Reranker</b> (Cohere Rerank, BGE-Reranker): a cross-encoder scores the actual query–chunk relationship (more accurate than vector distance), drops low scorers and re-orders the rest so the best answers come first.</li>
+</ul>
+
+<table>
+<tr><th>Retriever</th><th>Primary goal</th><th>Cost / latency</th><th>Best for</th></tr>
+<tr><td>Standard</td><td>Quick baseline search</td><td>Very low</td><td>Simple, direct or highly specific phrase matching</td></tr>
+<tr><td>Multi-query</td><td>Widen coverage (recall)</td><td>Medium: extra LLM call to write queries</td><td>Vague, short or ambiguous questions</td></tr>
+<tr><td>Contextual compression</td><td>Reduce noise, save tokens (precision)</td><td>High: extra extraction or reranking step</td><td>Long, messy documents with answers buried in filler</td></tr>
+</table>
+<p class="muted">They combine well: multi-query to cast a wide net, then a reranker to narrow it. This is the "recall first, precision second" pattern from <a href="#t6">Evaluating RAG</a>.</p>
+
 <h3>Advanced patterns</h3>
 <p>Simple vector search breaks down as RAG scales to enterprise use: accuracy, multi-step reasoning, security and changing data all become problems. These five patterns address them.</p>
 
@@ -267,6 +299,15 @@ filter: department = "HR" AND year >= 2024 AND access IN user.groups</pre>
 <tr><td>Durability / backup</td><td>Re-embedding is slow and costs money; keep source docs and back up the index</td></tr>
 </table>
 
+<h4>Why these concerns bite in production</h4>
+<ul>
+<li><b>Number of vectors (the memory wall):</b> HNSW is fastest with the whole index in RAM. Storage grows with the number of vectors × dimensions, so hundreds of millions of 1536-dim vectors need hundreds of GB. Beyond one machine you must <b>shard</b> the index, which adds network hops and makes query coordination harder.</li>
+<li><b>Latency:</b> total latency = embed query + vector search + rerank + LLM generation. Search slows as the index grows. On the LLM side, the <b>KV cache</b> (conversation history held in GPU memory) eats VRAM, and under heavy traffic request batching trades per-user latency for GPU throughput. Watch time-to-first-token (TTFT).</li>
+<li><b>Cost:</b> RAM for vectors plus GPUs or per-token fees for the model. Keep vectors on disk with only hot nodes cached (hybrid storage), reduce dimensions, and use <b>semantic caching</b>: store past answers and reuse them for semantically similar queries so repeats skip the LLM. This can cut a large share of calls where questions repeat.</li>
+<li><b>Updates and deletes:</b> ANN indexes prefer static data. Deleting a vector means unlinking graph nodes (CPU and disk I/O), and many systems mark deletes and compact later. Decide between <b>read-after-write consistency</b> (changes visible immediately, slower writes) and <b>eventual consistency</b> (a short lag, higher throughput). Stale answers while the index rebuilds are the usual symptom.</li>
+<li><b>Multi-tenancy:</b> never rely on a system prompt to separate customers. Enforce isolation in the database query layer: a namespace or index per tenant, or a tenant filter derived from the signed identity token (e.g. a JWT claim), so the app can't forget it. Offboarding a tenant is then one namespace delete. Also guard against <b>noisy neighbours</b>: one busy tenant can saturate the cache or token quota, so use per-tenant rate limits and resource quotas.</li>
+</ul>
+
 <h3>6. Choosing an embedding model</h3>
 <ul>
 <li><b>Quality:</b> check the <b>MTEB leaderboard</b>, but look at the retrieval score and test on <em>your</em> documents and questions; a leaderboard leader is not guaranteed to win on your domain (legal, medical, code).</li>
@@ -296,6 +337,16 @@ filter: department = "HR" AND year >= 2024 AND access IN user.groups</pre>
 <li><b>Compare against size:</b> a model ranked 5 places lower that is 10x smaller and cheaper is often the better engineering choice.</li>
 </ul>
 <div class="note"><b>Caveats:</b> scores are averages over public datasets, so models can overfit or even be trained on the test data (leakage); many entries are self-reported; and your domain (legal, medical, code, internal jargon) may behave differently. <b>Workflow:</b> shortlist 3 to 4 models from MTEB by retrieval score, size and language, then run them on your own 30 to 50 questions with <b>Recall@k</b> (see <a href="#t6">Evaluating RAG</a>) and choose from that result.</div>
+
+<h4>Dimensions, cost and language in more detail</h4>
+<ul>
+<li><b>Dimensions:</b> higher dimensions capture finer meaning but storage grows linearly with them. Models trained with <b>Matryoshka Representation Learning</b> (e.g. OpenAI text-embedding-3, some Google and open models) let you truncate the vector (say 1536 → 512 or 256) and keep most of the retrieval quality. Re-test recall after truncating.</li>
+<li><b>Cost, API:</b> pay per token and cheap at small to medium load (OpenAI text-embedding-3-small is around $0.02 per million tokens at the time of writing; check current pricing). Embedding is also needed for every query, not just ingestion.</li>
+<li><b>Cost, self-hosted:</b> open models (BGE, GTE, E5, Stella) make sense at very large volume or with data-sovereignty rules. Budget for GPU VRAM: multi-billion-parameter embedding models need serious hardware to keep latency low.</li>
+<li><b>Downstream cost:</b> every vector must be stored, and vector DBs bill mostly on RAM, so dimension count flows straight into your monthly bill.</li>
+<li><b>English-only vs multilingual:</b> English-only models are lighter and strong in English but fail on other languages. Multilingual ones (BGE-M3, multilingual-E5, embeddinggemma, Cohere multilingual) cover 100+ languages.</li>
+<li><b>Cross-lingual and code-mixed text:</b> real enterprise use often means querying in one language to find a document in another, or text that mixes languages and code. MTEB's multilingual tasks lean on translation-matching data, which can overstate real ability, so test with your own mixed-language samples.</li>
+</ul>
 
 <h3>7. Products compared</h3>
 <table>
