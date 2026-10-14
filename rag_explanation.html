@@ -41,6 +41,8 @@
             <button class="tab-btn" onclick="switchTab('query')">2. rag_query.py</button>
             <button class="tab-btn" onclick="switchTab('query-web')">3. rag_query_web.py</button>
             <button class="tab-btn" onclick="switchTab('summarize')">4. summarize.py</button>
+            <button class="tab-btn" onclick="switchTab('server')">5. gemma_server.py</button>
+            <button class="tab-btn" onclick="switchTab('chat-ui')">6. chat.js</button>
             <button class="tab-btn" onclick="switchTab('comparison')">Script Comparison</button>
         </div>
 
@@ -73,6 +75,18 @@
                         <div class="step-number">SUMMARIZER PIPELINE</div>
                         <h3>Map-Reduce Summarization</h3>
                         <p>Chunks long texts into 1,200-word blocks, summarizes each, then synthesizes a final summary with MLX LLaMA.</p>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <div class="step-number">API SERVER</div>
+                        <h3>OpenAI-Compatible FastAPI Server</h3>
+                        <p>Serves four local MLX models (tuned and base) with streaming, lazy loading and an OpenAI-style endpoint.</p>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <div class="step-number">WEB UI</div>
+                        <h3>Streaming Chat Window</h3>
+                        <p>A small browser chat page (HTML shell + chat.js) served by the FastAPI server; streams replies from any of the four local models.</p>
                     </div>
                 </div>
             </div>
@@ -432,6 +446,645 @@ model, tokenizer = load(args.model, **load_kwargs)</div>
                         <div class="explanation-text">
                             Provides command-line arguments to specify file path, custom MLX/HuggingFace models, max tokens, and custom fine-tuned <strong>LoRA adapters</strong>.
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: GEMMA_SERVER.PY -->
+        <div id="server" class="tab-panel">
+            <div class="arch-card">
+                <h2>gemma_server.py — FastAPI server for the local models</h2>
+                <p style="color: var(--text-secondary); font-size: 0.95rem;">One server in front of four MLX models (Gemma 270M and Llama 3B, each with and without its LoRA adapter). It exposes an OpenAI-compatible API, a simpler <code style="font-family:var(--font-mono);">/chat</code> endpoint, and serves the browser chat page. Models load on first use and only two stay in memory. The chat page (<code style="font-family:var(--font-mono);">chat.html</code> + <code style="font-family:var(--font-mono);">chat.js</code>) is served from the same app.</p>
+                <p style="color: var(--text-secondary); font-size: 0.9rem;">Run: <code style="font-family:var(--font-mono);">uvicorn server.gemma_server:app --port 8000</code> from <code style="font-family:var(--font-mono);">~/mlx-tuning</code>.</p>
+            </div>
+            <div class="explanation-grid">
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon"></span> server/gemma_server.py</span>
+                        <button class="copy-btn" onclick="copyCode('code-server')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-python" id="code-server">&quot;&quot;&quot;FastAPI server for the local MLX Gemma model (base + optional LoRA adapter).
+
+Run (from the mlx-tuning folder):  uvicorn server.gemma_server:app --port 8000
+Chat: http://127.0.0.1:8000/ (chat.html + chat.js)   API docs: http://127.0.0.1:8000/docs
+&quot;&quot;&quot;
+import asyncio
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import mlx.core as mx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from mlx_lm import load, stream_generate
+from mlx_lm.sample_utils import make_sampler
+from pydantic import BaseModel, Field
+
+TRAINING = Path(__file__).resolve().parent.parent / &quot;training&quot;
+
+# name -&gt; (HF model, LoRA adapter folder or None). Names go in the &quot;model&quot; field.
+MODELS = {
+    &quot;gemma-tuned&quot;: (&quot;google/gemma-3-270m-it&quot;, str(TRAINING / &quot;adapters&quot;)),
+    &quot;gemma-base&quot;: (&quot;google/gemma-3-270m-it&quot;, None),
+    &quot;llama-tuned&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, str(TRAINING / &quot;adapters_llama&quot;)),
+    &quot;llama-base&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, None),
+}
+DEFAULT = &quot;gemma-tuned&quot;
+MAX_LOADED = 2  # models kept in RAM at once (8GB Mac: Llama 3B is ~2GB); oldest is evicted
+
+state = {}  # name -&gt; (model, tokenizer), in load order
+
+
+def get_model(name: str):
+    &quot;&quot;&quot;Load on first use. Must run on the event-loop thread (MLX streams are thread-local).&quot;&quot;&quot;
+    if name not in MODELS:
+        raise HTTPException(404, f&quot;Unknown model &#x27;{name}&#x27;. Choose from {list(MODELS)}&quot;)
+    if name not in state:
+        while len(state) &gt;= MAX_LOADED:
+            state.pop(next(iter(state)))
+            mx.clear_cache()
+        repo, adapter = MODELS[name]
+        state[name] = load(repo, adapter_path=adapter)
+    return state[name]
+lock = asyncio.Lock()  # MLX runs on one GPU: handle one generation at a time
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_model(DEFAULT)  # warm up the default model
+    yield
+    state.clear()
+
+
+app = FastAPI(title=&quot;MLX Gemma&quot;, lifespan=lifespan)
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    max_tokens: int = Field(200, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base
+
+
+def build_prompt(req: ChatRequest) -&gt; str:
+    messages = []
+    if req.system:
+        messages.append({&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: req.system})
+    messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: req.prompt})
+    return get_model(req.model)[1].apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+
+
+def generate_chunks(req: ChatRequest):
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    model, tok = get_model(req.model)
+    for r in stream_generate(
+        model,
+        tok,
+        build_prompt(req),
+        max_tokens=req.max_tokens,
+        sampler=sampler,
+    ):
+        yield r.text
+
+
+@app.get(&quot;/&quot;, include_in_schema=False)
+def root():
+    return FileResponse(Path(__file__).with_name(&quot;chat.html&quot;))
+
+
+@app.get(&quot;/chat.js&quot;, include_in_schema=False)
+def chat_js():
+    return FileResponse(Path(__file__).with_name(&quot;chat.js&quot;), media_type=&quot;text/javascript&quot;)
+
+
+@app.get(&quot;/health&quot;)
+def health():
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;available&quot;: list(MODELS), &quot;loaded&quot;: list(state)}
+
+
+@app.post(&quot;/chat&quot;)
+async def chat(req: ChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    if req.stream:
+        async def sse():
+            async with lock:
+                for text in generate_chunks(req):
+                    yield f&quot;data: {json.dumps({&#x27;text&#x27;: text})}\n\n&quot;
+                    await asyncio.sleep(0)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)
+
+    async with lock:
+        text = &quot;&quot;.join(generate_chunks(req))  # same thread as load(): MLX streams are thread-local
+    return {&quot;response&quot;: text}
+
+
+# ---------- OpenAI-compatible API ----------
+class OAIMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OAIChatRequest(BaseModel):
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base
+    messages: list[OAIMessage]
+    max_tokens: int = Field(256, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+
+
+def oai_chunks(req: OAIChatRequest):
+    model, tok = get_model(req.model)
+    prompt = tok.apply_chat_template(
+        [m.model_dump() for m in req.messages], add_generation_prompt=True, tokenize=False
+    )
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    return stream_generate(
+        model, tok, prompt, max_tokens=req.max_tokens, sampler=sampler
+    )
+
+
+@app.get(&quot;/v1/models&quot;)
+def list_models():
+    return {&quot;object&quot;: &quot;list&quot;, &quot;data&quot;: [{&quot;id&quot;: m, &quot;object&quot;: &quot;model&quot;, &quot;owned_by&quot;: &quot;local&quot;} for m in MODELS]}
+
+
+@app.post(&quot;/v1/chat/completions&quot;)
+async def chat_completions(req: OAIChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    cid, created = f&quot;chatcmpl-{uuid.uuid4().hex[:24]}&quot;, int(time.time())
+
+    if req.stream:
+        def chunk(delta, finish=None):
+            body = {&quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: created,
+                    &quot;model&quot;: req.model, &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;delta&quot;: delta, &quot;finish_reason&quot;: finish}]}
+            return f&quot;data: {json.dumps(body)}\n\n&quot;
+
+        async def sse():
+            async with lock:
+                yield chunk({&quot;role&quot;: &quot;assistant&quot;})
+                for r in oai_chunks(req):
+                    yield chunk({&quot;content&quot;: r.text})
+                    await asyncio.sleep(0)
+            yield chunk({}, &quot;stop&quot;)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)
+
+    def run():
+        parts, last = [], None
+        for r in oai_chunks(req):
+            parts.append(r.text)
+            last = r
+        return &quot;&quot;.join(parts), last
+
+    async with lock:
+        text, last = run()  # same thread as load(): MLX streams are thread-local
+    pt = getattr(last, &quot;prompt_tokens&quot;, 0)
+    ct = getattr(last, &quot;generation_tokens&quot;, 0)
+    return {
+        &quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion&quot;, &quot;created&quot;: created, &quot;model&quot;: req.model,
+        &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;message&quot;: {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: text},
+                     &quot;finish_reason&quot;: &quot;stop&quot;}],
+        &quot;usage&quot;: {&quot;prompt_tokens&quot;: pt, &quot;completion_tokens&quot;: ct, &quot;total_tokens&quot;: pt + ct},
+    }
+</code></pre>
+                    </div>
+                </div>
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 1–5</span><span style="font-size:0.75rem; color:var(--text-muted);">Docstring</span></div>
+                        <div class="code-snippet">&quot;&quot;&quot;FastAPI server for the local MLX Gemma model (base + optional LoRA adapter).
+
+Run (from the mlx-tuning folder):  uvicorn server.gemma_server:app --port 8000
+Chat: http://127.0.0.1:8000/ (chat.html + chat.js)   API docs: http://127.0.0.1:8000/docs
+&quot;&quot;&quot;</div>
+                        <div class="explanation-text">Documents how to start the server. It is run as a module from the project root (<code style="font-family:var(--font-mono);">server.gemma_server:app</code>), which is why the adapter paths below are built from <code style="font-family:var(--font-mono);">__file__</code> rather than the current directory.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 6–18</span><span style="font-size:0.75rem; color:var(--text-muted);">Imports</span></div>
+                        <div class="code-snippet">import asyncio
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import mlx.core as mx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from mlx_lm import load, stream_generate
+from mlx_lm.sample_utils import make_sampler
+from pydantic import BaseModel, Field</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">FastAPI</code> is the web framework; <code style="font-family:var(--font-mono);">StreamingResponse</code> sends server-sent events; <code style="font-family:var(--font-mono);">FileResponse</code> serves the chat page files. From MLX: <code style="font-family:var(--font-mono);">load</code> loads a model, <code style="font-family:var(--font-mono);">stream_generate</code> yields text piece by piece, <code style="font-family:var(--font-mono);">make_sampler</code> applies temperature and top-p, and <code style="font-family:var(--font-mono);">mx.clear_cache</code> frees GPU memory. <code style="font-family:var(--font-mono);">pydantic</code> validates request bodies.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 20–30</span><span style="font-size:0.75rem; color:var(--text-muted);">Model registry and limits</span></div>
+                        <div class="code-snippet">TRAINING = Path(__file__).resolve().parent.parent / &quot;training&quot;
+
+# name -&gt; (HF model, LoRA adapter folder or None). Names go in the &quot;model&quot; field.
+MODELS = {
+    &quot;gemma-tuned&quot;: (&quot;google/gemma-3-270m-it&quot;, str(TRAINING / &quot;adapters&quot;)),
+    &quot;gemma-base&quot;: (&quot;google/gemma-3-270m-it&quot;, None),
+    &quot;llama-tuned&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, str(TRAINING / &quot;adapters_llama&quot;)),
+    &quot;llama-base&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, None),
+}
+DEFAULT = &quot;gemma-tuned&quot;
+MAX_LOADED = 2  # models kept in RAM at once (8GB Mac: Llama 3B is ~2GB); oldest is evicted</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">MODELS</code> maps a friendly name to (Hugging Face repo, LoRA adapter folder or <code style="font-family:var(--font-mono);">None</code>). The same base model appears twice, with and without its adapter. Paths use <code style="font-family:var(--font-mono);">Path(__file__)</code> so the server works from any directory. <code style="font-family:var(--font-mono);">MAX_LOADED = 2</code> limits RAM use on an 8 GB Mac.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 32–46</span><span style="font-size:0.75rem; color:var(--text-muted);">get_model(): lazy loading</span></div>
+                        <div class="code-snippet">state = {}  # name -&gt; (model, tokenizer), in load order
+
+
+def get_model(name: str):
+    &quot;&quot;&quot;Load on first use. Must run on the event-loop thread (MLX streams are thread-local).&quot;&quot;&quot;
+    if name not in MODELS:
+        raise HTTPException(404, f&quot;Unknown model &#x27;{name}&#x27;. Choose from {list(MODELS)}&quot;)
+    if name not in state:
+        while len(state) &gt;= MAX_LOADED:
+            state.pop(next(iter(state)))
+            mx.clear_cache()
+        repo, adapter = MODELS[name]
+        state[name] = load(repo, adapter_path=adapter)
+    return state[name]
+lock = asyncio.Lock()  # MLX runs on one GPU: handle one generation at a time</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">state</code> is an ordered dict of already-loaded models. On first request the model is loaded; if two are already in memory the oldest is evicted and the GPU cache cleared. Unknown names raise a 404 listing valid choices. <code style="font-family:var(--font-mono);">lock</code> (line 46) is an <code style="font-family:var(--font-mono);">asyncio.Lock</code>: MLX uses one GPU, so only one generation runs at a time. Loading and generating must happen on the same thread, because MLX streams are thread-local.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 49–56</span><span style="font-size:0.75rem; color:var(--text-muted);">Startup and app object</span></div>
+                        <div class="code-snippet">@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_model(DEFAULT)  # warm up the default model
+    yield
+    state.clear()
+
+
+app = FastAPI(title=&quot;MLX Gemma&quot;, lifespan=lifespan)</div>
+                        <div class="explanation-text">The <code style="font-family:var(--font-mono);">lifespan</code> function runs when the server starts: it preloads the default model so the first request is fast, then clears memory on shutdown. <code style="font-family:var(--font-mono);">app</code> is the ASGI application that uvicorn serves.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 59–66</span><span style="font-size:0.75rem; color:var(--text-muted);">ChatRequest (simple API)</span></div>
+                        <div class="code-snippet">class ChatRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    max_tokens: int = Field(200, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base</div>
+                        <div class="explanation-text">A Pydantic model that validates <code style="font-family:var(--font-mono);">POST /chat</code> bodies. <code style="font-family:var(--font-mono);">Field(ge=…, le=…)</code> enforces ranges, so a bad <code style="font-family:var(--font-mono);">temperature</code> returns a clear 422 error instead of reaching the model.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 69–89</span><span style="font-size:0.75rem; color:var(--text-muted);">Prompt building and generation</span></div>
+                        <div class="code-snippet">def build_prompt(req: ChatRequest) -&gt; str:
+    messages = []
+    if req.system:
+        messages.append({&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: req.system})
+    messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: req.prompt})
+    return get_model(req.model)[1].apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+
+
+def generate_chunks(req: ChatRequest):
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    model, tok = get_model(req.model)
+    for r in stream_generate(
+        model,
+        tok,
+        build_prompt(req),
+        max_tokens=req.max_tokens,
+        sampler=sampler,
+    ):
+        yield r.text</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">build_prompt</code> turns the optional system text and the user prompt into chat messages, then applies the model's own chat template, which adds the correct special tokens for Gemma or Llama. <code style="font-family:var(--font-mono);">generate_chunks</code> is a generator wrapping <code style="font-family:var(--font-mono);">stream_generate</code>, yielding text as each token is produced.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 92–104</span><span style="font-size:0.75rem; color:var(--text-muted);">Chat page files and health</span></div>
+                        <div class="code-snippet">@app.get(&quot;/&quot;, include_in_schema=False)
+def root():
+    return FileResponse(Path(__file__).with_name(&quot;chat.html&quot;))
+
+
+@app.get(&quot;/chat.js&quot;, include_in_schema=False)
+def chat_js():
+    return FileResponse(Path(__file__).with_name(&quot;chat.js&quot;), media_type=&quot;text/javascript&quot;)
+
+
+@app.get(&quot;/health&quot;)
+def health():
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;available&quot;: list(MODELS), &quot;loaded&quot;: list(state)}</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">GET /</code> returns <code style="font-family:var(--font-mono);">chat.html</code> and <code style="font-family:var(--font-mono);">GET /chat.js</code> returns the script it loads (<code style="font-family:var(--font-mono);">include_in_schema=False</code> hides both from the API docs; the JS needs an explicit <code style="font-family:var(--font-mono);">text/javascript</code> type). <code style="font-family:var(--font-mono);">GET /health</code> reports the available model names and which are loaded right now.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 107–122</span><span style="font-size:0.75rem; color:var(--text-muted);">POST /chat</span></div>
+                        <div class="code-snippet">@app.post(&quot;/chat&quot;)
+async def chat(req: ChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    if req.stream:
+        async def sse():
+            async with lock:
+                for text in generate_chunks(req):
+                    yield f&quot;data: {json.dumps({&#x27;text&#x27;: text})}\n\n&quot;
+                    await asyncio.sleep(0)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)
+
+    async with lock:
+        text = &quot;&quot;.join(generate_chunks(req))  # same thread as load(): MLX streams are thread-local
+    return {&quot;response&quot;: text}</div>
+                        <div class="explanation-text">Calls <code style="font-family:var(--font-mono);">get_model</code> first so a bad name fails with a normal 404 before any streaming starts. With <code style="font-family:var(--font-mono);">stream: true</code> it returns server-sent events (<code style="font-family:var(--font-mono);">data: {...}</code> lines ending with <code style="font-family:var(--font-mono);">[DONE]</code>); <code style="font-family:var(--font-mono);">await asyncio.sleep(0)</code> lets the server flush each chunk. Otherwise it joins all chunks and returns one JSON object. Both paths hold the lock.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 125–148</span><span style="font-size:0.75rem; color:var(--text-muted);">OpenAI request format</span></div>
+                        <div class="code-snippet"># ---------- OpenAI-compatible API ----------
+class OAIMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OAIChatRequest(BaseModel):
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base
+    messages: list[OAIMessage]
+    max_tokens: int = Field(256, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+
+
+def oai_chunks(req: OAIChatRequest):
+    model, tok = get_model(req.model)
+    prompt = tok.apply_chat_template(
+        [m.model_dump() for m in req.messages], add_generation_prompt=True, tokenize=False
+    )
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    return stream_generate(
+        model, tok, prompt, max_tokens=req.max_tokens, sampler=sampler
+    )</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">OAIChatRequest</code> mirrors the OpenAI schema: a <code style="font-family:var(--font-mono);">model</code> name and a list of <code style="font-family:var(--font-mono);">messages</code> with roles. <code style="font-family:var(--font-mono);">oai_chunks</code> applies the chat template to the whole conversation and starts generation, so multi-turn history works by the client sending every message each time.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 151–153</span><span style="font-size:0.75rem; color:var(--text-muted);">GET /v1/models</span></div>
+                        <div class="code-snippet">@app.get(&quot;/v1/models&quot;)
+def list_models():
+    return {&quot;object&quot;: &quot;list&quot;, &quot;data&quot;: [{&quot;id&quot;: m, &quot;object&quot;: &quot;model&quot;, &quot;owned_by&quot;: &quot;local&quot;} for m in MODELS]}</div>
+                        <div class="explanation-text">Lists the four model names in OpenAI's format. Tools and clients that offer a model dropdown call this endpoint.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 156–159</span><span style="font-size:0.75rem; color:var(--text-muted);">POST /v1/chat/completions: setup</span></div>
+                        <div class="code-snippet">@app.post(&quot;/v1/chat/completions&quot;)
+async def chat_completions(req: OAIChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    cid, created = f&quot;chatcmpl-{uuid.uuid4().hex[:24]}&quot;, int(time.time())</div>
+                        <div class="explanation-text">Validates and loads the model, then creates a unique completion id and timestamp that appear in every response, matching what OpenAI clients expect.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 161–176</span><span style="font-size:0.75rem; color:var(--text-muted);">Streaming response</span></div>
+                        <div class="code-snippet">    if req.stream:
+        def chunk(delta, finish=None):
+            body = {&quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: created,
+                    &quot;model&quot;: req.model, &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;delta&quot;: delta, &quot;finish_reason&quot;: finish}]}
+            return f&quot;data: {json.dumps(body)}\n\n&quot;
+
+        async def sse():
+            async with lock:
+                yield chunk({&quot;role&quot;: &quot;assistant&quot;})
+                for r in oai_chunks(req):
+                    yield chunk({&quot;content&quot;: r.text})
+                    await asyncio.sleep(0)
+            yield chunk({}, &quot;stop&quot;)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)</div>
+                        <div class="explanation-text">Each event is a <code style="font-family:var(--font-mono);">chat.completion.chunk</code> object: the first carries the role, the following ones carry <code style="font-family:var(--font-mono);">delta.content</code> text, and the last has <code style="font-family:var(--font-mono);">finish_reason: stop</code> followed by <code style="font-family:var(--font-mono);">[DONE]</code>. This is the exact format the chat page and the OpenAI SDK parse.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 178–194</span><span style="font-size:0.75rem; color:var(--text-muted);">Non-streaming response</span></div>
+                        <div class="code-snippet">    def run():
+        parts, last = [], None
+        for r in oai_chunks(req):
+            parts.append(r.text)
+            last = r
+        return &quot;&quot;.join(parts), last
+
+    async with lock:
+        text, last = run()  # same thread as load(): MLX streams are thread-local
+    pt = getattr(last, &quot;prompt_tokens&quot;, 0)
+    ct = getattr(last, &quot;generation_tokens&quot;, 0)
+    return {
+        &quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion&quot;, &quot;created&quot;: created, &quot;model&quot;: req.model,
+        &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;message&quot;: {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: text},
+                     &quot;finish_reason&quot;: &quot;stop&quot;}],
+        &quot;usage&quot;: {&quot;prompt_tokens&quot;: pt, &quot;completion_tokens&quot;: ct, &quot;total_tokens&quot;: pt + ct},
+    }</div>
+                        <div class="explanation-text">Runs generation to completion on the event-loop thread (not <code style="font-family:var(--font-mono);">asyncio.to_thread</code>, which would fail because MLX streams are thread-local) and returns a standard <code style="font-family:var(--font-mono);">chat.completion</code> object with token usage counts taken from the last generated chunk.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: CHAT.JS -->
+        <div id="chat-ui" class="tab-panel">
+            <div class="arch-card">
+                <h2>chat.js — the browser chat logic</h2>
+                <p style="color: var(--text-secondary); font-size: 0.95rem;">The server serves a small page, <code style="font-family:var(--font-mono);">chat.html</code> (markup and CSS: a header with controls, a scrolling message log and an input form), which loads this script from <code style="font-family:var(--font-mono);">/chat.js</code>. No libraries or build step. It talks to the server's OpenAI-compatible endpoint with streaming, using relative URLs, so it works from localhost or through a tunnel without configuration.</p>
+                <p style="color: var(--text-secondary); font-size: 0.9rem;">The script finds the page elements by id: <code style="font-family:var(--font-mono);">model</code> <code style="font-family:var(--font-mono);">temp</code> <code style="font-family:var(--font-mono);">max</code> <code style="font-family:var(--font-mono);">sysbtn</code> <code style="font-family:var(--font-mono);">clear</code> <code style="font-family:var(--font-mono);">sys</code> <code style="font-family:var(--font-mono);">log</code> <code style="font-family:var(--font-mono);">form</code> <code style="font-family:var(--font-mono);">input</code> <code style="font-family:var(--font-mono);">send</code>. The HTML is only the shell for these, so the cards below explain just the script.</p>
+            </div>
+            <div class="explanation-grid">
+                <div class="code-container">
+                    <div class="code-header">
+                        <span class="file-name"><span class="file-icon"></span> server/chat.js</span>
+                        <button class="copy-btn" onclick="copyCode('code-chat-ui')">Copy Code</button>
+                    </div>
+                    <div class="code-body">
+                        <pre><code class="language-javascript" id="code-chat-ui">const $ = id =&gt; document.getElementById(id);
+let history = [], busy = false;
+
+fetch(&#x27;/v1/models&#x27;).then(r =&gt; r.json()).then(d =&gt; {
+  $(&#x27;model&#x27;).innerHTML = d.data.map(m =&gt; `&lt;option&gt;${m.id}&lt;/option&gt;`).join(&#x27;&#x27;);
+  try { const s = localStorage.getItem(&#x27;model&#x27;); if (s) $(&#x27;model&#x27;).value = s; } catch (e) {}
+});
+$(&#x27;model&#x27;).onchange = () =&gt; { try { localStorage.setItem(&#x27;model&#x27;, $(&#x27;model&#x27;).value); } catch (e) {} };
+$(&#x27;sysbtn&#x27;).onclick = () =&gt; $(&#x27;sys&#x27;).classList.toggle(&#x27;on&#x27;);
+$(&#x27;clear&#x27;).onclick = () =&gt; { history = []; $(&#x27;log&#x27;).innerHTML = &#x27;&#x27;; };
+
+function add(cls, text) {
+  const e = $(&#x27;empty&#x27;); if (e) e.remove();
+  const d = document.createElement(&#x27;div&#x27;);
+  d.className = &#x27;msg &#x27; + cls; d.textContent = text;
+  $(&#x27;log&#x27;).appendChild(d); $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight;
+  return d;
+}
+const input = $(&#x27;input&#x27;);
+input.addEventListener(&#x27;input&#x27;, () =&gt; { input.style.height = &#x27;auto&#x27;; input.style.height = input.scrollHeight + &#x27;px&#x27;; });
+input.addEventListener(&#x27;keydown&#x27;, e =&gt; { if (e.key === &#x27;Enter&#x27; &amp;&amp; !e.shiftKey) { e.preventDefault(); $(&#x27;form&#x27;).requestSubmit(); } });
+
+$(&#x27;form&#x27;).onsubmit = async e =&gt; {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true; $(&#x27;send&#x27;).disabled = true;
+  input.value = &#x27;&#x27;; input.style.height = &#x27;auto&#x27;;
+  add(&#x27;me&#x27;, text);
+  history.push({role: &#x27;user&#x27;, content: text});
+  const bot = add(&#x27;bot&#x27;, &#x27;…&#x27;);
+  const messages = ($(&#x27;sys&#x27;).value.trim() ? [{role: &#x27;system&#x27;, content: $(&#x27;sys&#x27;).value.trim()}] : []).concat(history);
+  const t0 = performance.now();
+  let out = &#x27;&#x27;;
+  try {
+    const res = await fetch(&#x27;/v1/chat/completions&#x27;, {
+      method: &#x27;POST&#x27;, headers: {&#x27;Content-Type&#x27;: &#x27;application/json&#x27;},
+      body: JSON.stringify({model: $(&#x27;model&#x27;).value, messages, stream: true,
+        temperature: +$(&#x27;temp&#x27;).value, max_tokens: +$(&#x27;max&#x27;).value})
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = &#x27;&#x27;;
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const parts = buf.split(&#x27;\n\n&#x27;); buf = parts.pop();
+      for (const p of parts) {
+        if (!p.startsWith(&#x27;data: &#x27;) || p.includes(&#x27;[DONE]&#x27;)) continue;
+        const delta = JSON.parse(p.slice(6)).choices[0].delta;
+        if (delta.content) { out += delta.content; bot.textContent = out; $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight; }
+      }
+    }
+    history.push({role: &#x27;assistant&#x27;, content: out});
+    const m = document.createElement(&#x27;div&#x27;); m.className = &#x27;meta&#x27;;
+    m.textContent = $(&#x27;model&#x27;).value + &#x27; · &#x27; + ((performance.now() - t0) / 1000).toFixed(1) + &#x27;s&#x27;;
+    bot.appendChild(m);
+  } catch (err) {
+    bot.textContent = &#x27;Error: &#x27; + err.message;
+    history.pop();
+  }
+  busy = false; $(&#x27;send&#x27;).disabled = false; input.focus();
+};</code></pre>
+                    </div>
+                </div>
+                <div class="line-list">
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Overall flow</span><span style="font-size:0.75rem; color:var(--text-muted);">How a message travels</span></div>
+                        <div class="code-snippet">1. GET /            → chat.html
+2. GET /chat.js     → this script
+3. GET /v1/models   → fill dropdown
+4. user presses Enter
+5. POST /v1/chat/completions
+   {model, messages, stream:true}
+6. server streams back:
+   data: {delta:{content:&quot;Seer&quot;}}
+   data: {delta:{content:&quot;oo&quot;}}
+   data: [DONE]
+7. append text live, save to history</div>
+                        <div class="explanation-text">The page is split in two: <code style="font-family:var(--font-mono);">chat.html</code> holds the markup and CSS, <code style="font-family:var(--font-mono);">chat.js</code> holds all behaviour. The model never remembers earlier turns, so the browser keeps the conversation and re-sends all of it each time.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 1–2</span><span style="font-size:0.75rem; color:var(--text-muted);">State and helper</span></div>
+                        <div class="code-snippet">const $ = id =&gt; document.getElementById(id);
+let history = [], busy = false;</div>
+                        <div class="explanation-text"><code style="font-family:var(--font-mono);">$</code> is a tiny <code style="font-family:var(--font-mono);">getElementById</code> shortcut. <code style="font-family:var(--font-mono);">history</code> is the conversation sent to the model on every request, because the server is stateless. <code style="font-family:var(--font-mono);">busy</code> blocks a second send while a reply is still streaming.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 4–10</span><span style="font-size:0.75rem; color:var(--text-muted);">Page setup</span></div>
+                        <div class="code-snippet">fetch(&#x27;/v1/models&#x27;).then(r =&gt; r.json()).then(d =&gt; {
+  $(&#x27;model&#x27;).innerHTML = d.data.map(m =&gt; `&lt;option&gt;${m.id}&lt;/option&gt;`).join(&#x27;&#x27;);
+  try { const s = localStorage.getItem(&#x27;model&#x27;); if (s) $(&#x27;model&#x27;).value = s; } catch (e) {}
+});
+$(&#x27;model&#x27;).onchange = () =&gt; { try { localStorage.setItem(&#x27;model&#x27;, $(&#x27;model&#x27;).value); } catch (e) {} };
+$(&#x27;sysbtn&#x27;).onclick = () =&gt; $(&#x27;sys&#x27;).classList.toggle(&#x27;on&#x27;);
+$(&#x27;clear&#x27;).onclick = () =&gt; { history = []; $(&#x27;log&#x27;).innerHTML = &#x27;&#x27;; };</div>
+                        <div class="explanation-text">Fetches <code style="font-family:var(--font-mono);">/v1/models</code> to fill the dropdown, then restores the last chosen model from <code style="font-family:var(--font-mono);">localStorage</code> (in try/catch in case storage is blocked). Also wires the System toggle and the Clear button, which empties <code style="font-family:var(--font-mono);">history</code> and the log.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 12–18</span><span style="font-size:0.75rem; color:var(--text-muted);">add(): draw a message</span></div>
+                        <div class="code-snippet">function add(cls, text) {
+  const e = $(&#x27;empty&#x27;); if (e) e.remove();
+  const d = document.createElement(&#x27;div&#x27;);
+  d.className = &#x27;msg &#x27; + cls; d.textContent = text;
+  $(&#x27;log&#x27;).appendChild(d); $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight;
+  return d;
+}</div>
+                        <div class="explanation-text">Creates a message bubble (class <code style="font-family:var(--font-mono);">me</code> or <code style="font-family:var(--font-mono);">bot</code>), appends it, scrolls to the bottom and returns the element so the streaming code can keep updating it. It uses <code style="font-family:var(--font-mono);">textContent</code>, not <code style="font-family:var(--font-mono);">innerHTML</code>, so model output can never inject HTML.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 19–21</span><span style="font-size:0.75rem; color:var(--text-muted);">Input behaviour</span></div>
+                        <div class="code-snippet">const input = $(&#x27;input&#x27;);
+input.addEventListener(&#x27;input&#x27;, () =&gt; { input.style.height = &#x27;auto&#x27;; input.style.height = input.scrollHeight + &#x27;px&#x27;; });
+input.addEventListener(&#x27;keydown&#x27;, e =&gt; { if (e.key === &#x27;Enter&#x27; &amp;&amp; !e.shiftKey) { e.preventDefault(); $(&#x27;form&#x27;).requestSubmit(); } });</div>
+                        <div class="explanation-text">The textarea grows with its content. <strong>Enter</strong> submits via <code style="font-family:var(--font-mono);">requestSubmit()</code>; <strong>Shift+Enter</strong> inserts a newline.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 23–34</span><span style="font-size:0.75rem; color:var(--text-muted);">Submit: prepare the request</span></div>
+                        <div class="code-snippet">$(&#x27;form&#x27;).onsubmit = async e =&gt; {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true; $(&#x27;send&#x27;).disabled = true;
+  input.value = &#x27;&#x27;; input.style.height = &#x27;auto&#x27;;
+  add(&#x27;me&#x27;, text);
+  history.push({role: &#x27;user&#x27;, content: text});
+  const bot = add(&#x27;bot&#x27;, &#x27;…&#x27;);
+  const messages = ($(&#x27;sys&#x27;).value.trim() ? [{role: &#x27;system&#x27;, content: $(&#x27;sys&#x27;).value.trim()}] : []).concat(history);
+  const t0 = performance.now();
+  let out = &#x27;&#x27;;</div>
+                        <div class="explanation-text">Ignores empty text or a send while busy, locks the Send button, clears the box, shows the user's bubble and adds the turn to <code style="font-family:var(--font-mono);">history</code>. A placeholder “…” bot bubble is created. <code style="font-family:var(--font-mono);">messages</code> is the optional system prompt followed by the full history, in OpenAI chat format.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 35–41</span><span style="font-size:0.75rem; color:var(--text-muted);">Call the API</span></div>
+                        <div class="code-snippet">  try {
+    const res = await fetch(&#x27;/v1/chat/completions&#x27;, {
+      method: &#x27;POST&#x27;, headers: {&#x27;Content-Type&#x27;: &#x27;application/json&#x27;},
+      body: JSON.stringify({model: $(&#x27;model&#x27;).value, messages, stream: true,
+        temperature: +$(&#x27;temp&#x27;).value, max_tokens: +$(&#x27;max&#x27;).value})
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);</div>
+                        <div class="explanation-text">POSTs to <code style="font-family:var(--font-mono);">/v1/chat/completions</code> with <code style="font-family:var(--font-mono);">stream: true</code> plus the chosen model, temperature and max tokens. If the server answers with an error (for example a 404 for an unknown model) the <code style="font-family:var(--font-mono);">detail</code> message is thrown and shown in the bubble.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 42–54</span><span style="font-size:0.75rem; color:var(--text-muted);">Read the stream</span></div>
+                        <div class="code-snippet">    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = &#x27;&#x27;;
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const parts = buf.split(&#x27;\n\n&#x27;); buf = parts.pop();
+      for (const p of parts) {
+        if (!p.startsWith(&#x27;data: &#x27;) || p.includes(&#x27;[DONE]&#x27;)) continue;
+        const delta = JSON.parse(p.slice(6)).choices[0].delta;
+        if (delta.content) { out += delta.content; bot.textContent = out; $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight; }
+      }
+    }</div>
+                        <div class="explanation-text">Reads the response body chunk by chunk. Server-sent events are separated by a blank line, so the buffer is split on <code style="font-family:var(--font-mono);">\n\n</code> and the unfinished tail is kept for the next chunk. Each <code style="font-family:var(--font-mono);">data: {...}</code> line is parsed and its <code style="font-family:var(--font-mono);">delta.content</code> is appended to the bubble, which is how words appear live. <code style="font-family:var(--font-mono);">[DONE]</code> marks the end.</div>
+                    </div>
+                    <div class="line-card">
+                        <div class="line-card-header"><span class="line-badge">Lines 55–64</span><span style="font-size:0.75rem; color:var(--text-muted);">Finish and errors</span></div>
+                        <div class="code-snippet">    history.push({role: &#x27;assistant&#x27;, content: out});
+    const m = document.createElement(&#x27;div&#x27;); m.className = &#x27;meta&#x27;;
+    m.textContent = $(&#x27;model&#x27;).value + &#x27; · &#x27; + ((performance.now() - t0) / 1000).toFixed(1) + &#x27;s&#x27;;
+    bot.appendChild(m);
+  } catch (err) {
+    bot.textContent = &#x27;Error: &#x27; + err.message;
+    history.pop();
+  }
+  busy = false; $(&#x27;send&#x27;).disabled = false; input.focus();
+};</div>
+                        <div class="explanation-text">On success the full reply is saved to <code style="font-family:var(--font-mono);">history</code> and a small line with the model name and elapsed seconds is added. On failure the error is displayed and the unanswered user turn is removed from <code style="font-family:var(--font-mono);">history</code> so a retry doesn't send a dangling message. Finally the Send button is re-enabled and focus returns to the input.</div>
                     </div>
                 </div>
             </div>

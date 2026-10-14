@@ -159,7 +159,7 @@ llama-quantize \
   }'</code></pre>
 
 <h3>2.4 Custom FastAPI server with a chat page — <code>server/gemma_server.py</code></h3>
-<p><code>mlx_lm.server</code> (2.3) serves one model. For this project there is also a small FastAPI server that keeps <strong>four model choices</strong> behind one OpenAI-compatible API (base and fine-tuned, Gemma and Llama) and serves a simple <strong>chat web page</strong>. Files: <code>server/gemma_server.py</code> and <code>server/chat.html</code>.</p>
+<p><code>mlx_lm.server</code> (2.3) serves one model. For this project there is also a small FastAPI server that keeps <strong>four model choices</strong> behind one OpenAI-compatible API (base and fine-tuned, Gemma and Llama) and serves a simple <strong>chat web page</strong>. Files: <code>server/gemma_server.py</code>, <code>server/chat.html</code> and <code>server/chat.js</code>.</p>
 <pre><code>cd ~/mlx-tuning
 source my_env/bin/activate
 pip install fastapi uvicorn          # once
@@ -168,7 +168,7 @@ uvicorn server.gemma_server:app --port 8000</code></pre>
 
 <table>
 <tr><th>Endpoint</th><th>What it does</th></tr>
-<tr><td><code>GET /</code></td><td>Chat web page (model dropdown, temperature, max tokens, system prompt, streaming replies)</td></tr>
+<tr><td><code>GET /</code> and <code>GET /chat.js</code></td><td>Chat web page: HTML shell plus its script (model dropdown, temperature, max tokens, system prompt, streaming replies)</td></tr>
 <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible chat, with <code>"stream": true</code> support</td></tr>
 <tr><td><code>GET /v1/models</code></td><td>Lists the four model names</td></tr>
 <tr><td><code>POST /chat</code></td><td>Simpler endpoint: <code>prompt</code>, optional <code>system</code>, <code>model</code>, <code>max_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></td></tr>
@@ -208,11 +208,148 @@ print(r.choices[0].message.content)</code></pre>
 </ul>
 </div>
 
-<h4>Full source</h4>
+<h4>The chat page — <code>server/chat.html</code> + <code>server/chat.js</code></h4>
+<p>The page is split in two plain files with no libraries and no build step. The server returns <code>chat.html</code> at <code>GET /</code> and the script at <code>GET /chat.js</code>. They use relative URLs, so they work from <code>localhost</code> or any tunnel address without configuration.</p>
+<ul>
+  <li><strong><code>chat.html</code></strong> is only the shell: markup and CSS for a header with controls, a scrolling message log and an input form, plus <code>&lt;script src="/chat.js"&gt;</code>. It follows the system light/dark setting and fits a phone screen.</li>
+  <li><strong><code>chat.js</code></strong> holds all behaviour:
+    <ul>
+      <li><strong>Model dropdown</strong> filled from <code>/v1/models</code>; the last choice is remembered in <code>localStorage</code>.</li>
+      <li><strong>Streaming:</strong> it calls <code>/v1/chat/completions</code> with <code>"stream": true</code> and reads the server-sent events, appending each chunk to the reply as it arrives.</li>
+      <li><strong>Multi-turn:</strong> the whole conversation is sent on every request, because the model has no memory between calls. If a request fails, that user turn is removed from the history so you can retry.</li>
+      <li>Settings: temperature, max tokens and an optional system prompt. Enter sends, Shift+Enter adds a new line. Each reply shows the model name and response time.</li>
+    </ul>
+  </li>
+</ul>
+<details><summary>Show source of chat.html</summary>
+<pre><code>&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1, interactive-widget=resizes-content&quot;&gt;
+&lt;title&gt;Local MLX Chat&lt;/title&gt;
+&lt;style&gt;
+:root{--bg:#fafaf8;--fg:#1d1d1b;--mut:#62625c;--card:#fff;--bd:#e3e2dc;--acc:#2f6fed;--accfg:#fff;--me:#e8effd;--code:#f1f0ea}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--fg:#ececea;--mut:#a0a09a;--card:#1d1d20;--bd:#333338;--acc:#7aa2ff;--accfg:#111;--me:#22304d;--code:#26262a}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,BlinkMacSystemFont,&quot;Segoe UI&quot;,sans-serif;display:flex;flex-direction:column}
+header{background:var(--card);border-bottom:1px solid var(--bd);padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+header h1{font-size:1rem;margin:0 auto 0 0}
+select,input,textarea,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:6px 10px}
+header input[type=number]{width:5.2em}
+header label{font-size:.8rem;color:var(--mut);display:flex;align-items:center;gap:4px}
+#sys{flex:1 1 100%;display:none}
+#sys.on{display:block}
+#log{flex:1;overflow-y:auto;padding:16px 14px;display:flex;flex-direction:column;gap:12px;max-width:820px;width:100%;margin:0 auto}
+.msg{max-width:88%;padding:10px 14px;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.me{align-self:flex-end;background:var(--me);border-bottom-right-radius:4px}
+.bot{align-self:flex-start;background:var(--card);border:1px solid var(--bd);border-bottom-left-radius:4px}
+.meta{font-size:.72rem;color:var(--mut);margin-top:4px}
+.empty{margin:auto;color:var(--mut);text-align:center}
+form{background:var(--card);border-top:1px solid var(--bd);padding:10px 14px calc(10px + env(safe-area-inset-bottom))}
+.row{display:flex;gap:8px;max-width:820px;margin:0 auto}
+textarea{flex:1;resize:none;max-height:140px}
+button{cursor:pointer}
+button.send{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600;padding:6px 16px}
+button:disabled{opacity:.5;cursor:default}
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;header&gt;
+  &lt;h1&gt;Local MLX Chat&lt;/h1&gt;
+  &lt;select id=&quot;model&quot; title=&quot;Model&quot;&gt;&lt;/select&gt;
+  &lt;label&gt;temp &lt;input id=&quot;temp&quot; type=&quot;number&quot; min=&quot;0&quot; max=&quot;2&quot; step=&quot;0.1&quot; value=&quot;0.3&quot;&gt;&lt;/label&gt;
+  &lt;label&gt;max tokens &lt;input id=&quot;max&quot; type=&quot;number&quot; min=&quot;1&quot; max=&quot;2048&quot; value=&quot;256&quot;&gt;&lt;/label&gt;
+  &lt;button type=&quot;button&quot; id=&quot;sysbtn&quot;&gt;System&lt;/button&gt;
+  &lt;button type=&quot;button&quot; id=&quot;clear&quot;&gt;Clear&lt;/button&gt;
+  &lt;input id=&quot;sys&quot; placeholder=&quot;Optional system prompt, e.g. Answer briefly.&quot;&gt;
+&lt;/header&gt;
+&lt;div id=&quot;log&quot;&gt;&lt;div class=&quot;empty&quot; id=&quot;empty&quot;&gt;Pick a model and say hi.&lt;br&gt;The first message to a model can take a few seconds while it loads.&lt;/div&gt;&lt;/div&gt;
+&lt;form id=&quot;form&quot;&gt;
+  &lt;div class=&quot;row&quot;&gt;
+    &lt;textarea id=&quot;input&quot; rows=&quot;1&quot; placeholder=&quot;Message… (Enter to send, Shift+Enter for new line)&quot; autofocus&gt;&lt;/textarea&gt;
+    &lt;button class=&quot;send&quot; id=&quot;send&quot;&gt;Send&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/form&gt;
+&lt;script src=&quot;/chat.js&quot;&gt;&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+</details>
+<details><summary>Show source of chat.js</summary>
+<pre><code>const $ = id =&gt; document.getElementById(id);
+let history = [], busy = false;
+
+fetch(&#x27;/v1/models&#x27;).then(r =&gt; r.json()).then(d =&gt; {
+  $(&#x27;model&#x27;).innerHTML = d.data.map(m =&gt; `&lt;option&gt;${m.id}&lt;/option&gt;`).join(&#x27;&#x27;);
+  try { const s = localStorage.getItem(&#x27;model&#x27;); if (s) $(&#x27;model&#x27;).value = s; } catch (e) {}
+});
+$(&#x27;model&#x27;).onchange = () =&gt; { try { localStorage.setItem(&#x27;model&#x27;, $(&#x27;model&#x27;).value); } catch (e) {} };
+$(&#x27;sysbtn&#x27;).onclick = () =&gt; $(&#x27;sys&#x27;).classList.toggle(&#x27;on&#x27;);
+$(&#x27;clear&#x27;).onclick = () =&gt; { history = []; $(&#x27;log&#x27;).innerHTML = &#x27;&#x27;; };
+
+function add(cls, text) {
+  const e = $(&#x27;empty&#x27;); if (e) e.remove();
+  const d = document.createElement(&#x27;div&#x27;);
+  d.className = &#x27;msg &#x27; + cls; d.textContent = text;
+  $(&#x27;log&#x27;).appendChild(d); $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight;
+  return d;
+}
+const input = $(&#x27;input&#x27;);
+input.addEventListener(&#x27;input&#x27;, () =&gt; { input.style.height = &#x27;auto&#x27;; input.style.height = input.scrollHeight + &#x27;px&#x27;; });
+input.addEventListener(&#x27;keydown&#x27;, e =&gt; { if (e.key === &#x27;Enter&#x27; &amp;&amp; !e.shiftKey) { e.preventDefault(); $(&#x27;form&#x27;).requestSubmit(); } });
+
+$(&#x27;form&#x27;).onsubmit = async e =&gt; {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true; $(&#x27;send&#x27;).disabled = true;
+  input.value = &#x27;&#x27;; input.style.height = &#x27;auto&#x27;;
+  add(&#x27;me&#x27;, text);
+  history.push({role: &#x27;user&#x27;, content: text});
+  const bot = add(&#x27;bot&#x27;, &#x27;…&#x27;);
+  const messages = ($(&#x27;sys&#x27;).value.trim() ? [{role: &#x27;system&#x27;, content: $(&#x27;sys&#x27;).value.trim()}] : []).concat(history);
+  const t0 = performance.now();
+  let out = &#x27;&#x27;;
+  try {
+    const res = await fetch(&#x27;/v1/chat/completions&#x27;, {
+      method: &#x27;POST&#x27;, headers: {&#x27;Content-Type&#x27;: &#x27;application/json&#x27;},
+      body: JSON.stringify({model: $(&#x27;model&#x27;).value, messages, stream: true,
+        temperature: +$(&#x27;temp&#x27;).value, max_tokens: +$(&#x27;max&#x27;).value})
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = &#x27;&#x27;;
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const parts = buf.split(&#x27;\n\n&#x27;); buf = parts.pop();
+      for (const p of parts) {
+        if (!p.startsWith(&#x27;data: &#x27;) || p.includes(&#x27;[DONE]&#x27;)) continue;
+        const delta = JSON.parse(p.slice(6)).choices[0].delta;
+        if (delta.content) { out += delta.content; bot.textContent = out; $(&#x27;log&#x27;).scrollTop = $(&#x27;log&#x27;).scrollHeight; }
+      }
+    }
+    history.push({role: &#x27;assistant&#x27;, content: out});
+    const m = document.createElement(&#x27;div&#x27;); m.className = &#x27;meta&#x27;;
+    m.textContent = $(&#x27;model&#x27;).value + &#x27; · &#x27; + ((performance.now() - t0) / 1000).toFixed(1) + &#x27;s&#x27;;
+    bot.appendChild(m);
+  } catch (err) {
+    bot.textContent = &#x27;Error: &#x27; + err.message;
+    history.pop();
+  }
+  busy = false; $(&#x27;send&#x27;).disabled = false; input.focus();
+};
+</code></pre>
+</details>
+
+<h4>Server source — <code>server/gemma_server.py</code></h4>
 <pre><code>&quot;&quot;&quot;FastAPI server for the local MLX Gemma model (base + optional LoRA adapter).
 
 Run (from the mlx-tuning folder):  uvicorn server.gemma_server:app --port 8000
-Chat: http://127.0.0.1:8000/   API docs: http://127.0.0.1:8000/docs
+Chat: http://127.0.0.1:8000/ (chat.html + chat.js)   API docs: http://127.0.0.1:8000/docs
 &quot;&quot;&quot;
 import asyncio
 import json
@@ -303,6 +440,11 @@ def generate_chunks(req: ChatRequest):
 @app.get(&quot;/&quot;, include_in_schema=False)
 def root():
     return FileResponse(Path(__file__).with_name(&quot;chat.html&quot;))
+
+
+@app.get(&quot;/chat.js&quot;, include_in_schema=False)
+def chat_js():
+    return FileResponse(Path(__file__).with_name(&quot;chat.js&quot;), media_type=&quot;text/javascript&quot;)
 
 
 @app.get(&quot;/health&quot;)

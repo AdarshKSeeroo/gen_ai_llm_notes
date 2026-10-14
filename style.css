@@ -181,3 +181,6 @@ section.collapsed>h2{margin-bottom:0}
   @media (prefers-color-scheme:dark){.toc-toggle{color:#111}}
 }
 @media print{.toc-side,.toc-toggle,.toc-scrim,.to-top{display:none}.has-toc main,.has-toc .wrap{margin:0 auto}}
+
+details{margin:12px 0}
+summary{cursor:pointer;color:var(--acc);font-weight:600;padding:4px 0}
