@@ -784,6 +784,26 @@ print(json.dumps(search_config.model_dump(), indent=2))</pre>
 </ul>
 <p class="muted">Good descriptions matter: they are the only thing the model uses to choose. Details and Pydantic examples are in <a href="#t8">Tool calling &amp; structured outputs</a>.</p>
 
+<h3>What is an agent harness?</h3>
+<p>The <b>harness</b> is all the code around the model that turns a text predictor into an agent. The model decides what to do next; the harness is what actually runs the loop, executes tools, and decides what the model gets to see. <b>Model + harness = agent.</b> Claude Code, for example, is a harness around Claude.</p>
+<table>
+<tr><th>Harness component</th><th>What it does</th><th>Covered in these notes</th></tr>
+<tr><td><b>The loop</b></td><td>Calls the model, checks whether it asked for a tool, runs it, appends the result, repeats until the stop condition or a step limit</td><td>Above, "What makes something an agent?"</td></tr>
+<tr><td><b>Tool definitions and execution</b></td><td>Declares tools to the model, parses its requests, validates arguments, runs the real function, returns the result</td><td><a href="#t8">Tool calling</a>, <a href="#t11">MCP</a></td></tr>
+<tr><td><b>Prompt and context assembly</b></td><td>Builds each turn's input: system prompt, instructions, history, tool results, retrieved documents; trims or summarises when the window fills</td><td><a href="#t1">Prompting</a>, <a href="#t3">RAG</a></td></tr>
+<tr><td><b>Memory</b></td><td>Keeps short-term state for the run and saves or retrieves long-term facts</td><td><a href="#t7">Memory</a></td></tr>
+<tr><td><b>Permissions and approvals</b></td><td>Decides which tools may run automatically, which need a human, and which are blocked</td><td>Human-in-the-loop below</td></tr>
+<tr><td><b>Guardrails and limits</b></td><td>Max steps, timeouts, spend caps, input/output filtering, sandboxing</td><td>Risks and controls below</td></tr>
+<tr><td><b>Retries and error handling</b></td><td>Recovers from failed tool calls, malformed output and rate limits</td><td><a href="#t8">Structured outputs</a></td></tr>
+<tr><td><b>Tracing and logging</b></td><td>Records every step so runs can be debugged and evaluated</td><td><a href="frameworks.html">LangSmith</a></td></tr>
+</table>
+<h4>Model vs. harness</h4>
+<div class="grid">
+<div class="card"><span class="tag neu">The model</span><p>Reasons over the context it is given and picks the next action or answer. It has no tools, memory or permissions of its own, and it never executes anything.</p></div>
+<div class="card"><span class="tag good">The harness</span><p>Supplies the context, offers the tools, runs the actions, enforces the rules and keeps state. It is ordinary software, so it can be tested, versioned and audited.</p></div>
+</div>
+<div class="note"><b>Why it matters:</b> the same model can behave very differently in different harnesses, because tool choice, context management and guardrails shape the results as much as the model does. When an agent misbehaves, check the harness (what it saw, what tools it had, what limits applied) before blaming the model. Frameworks such as <a href="frameworks.html">LangGraph</a> and the OpenAI Agents SDK are, in effect, toolkits for building harnesses.</div>
+
 <h3>Agent patterns</h3>
 <table>
 <tr><th>Pattern</th><th>How it works</th><th>Why use it</th></tr>
