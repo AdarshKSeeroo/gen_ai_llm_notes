@@ -166,10 +166,10 @@ section.collapsed>.fold-h::after{content:"▸"}
 section.collapsed>*:not(h2){display:none}
 section.collapsed>h2{margin-bottom:0}
 @media (min-width:1100px){
-  .has-toc main,.has-toc .wrap{margin-right:296px;margin-left:auto}
+  .has-toc main,.has-toc .wrap,.has-toc .sitebar div{margin-right:296px;margin-left:auto}
 }
 @media (min-width:1440px){
-  .has-toc main,.has-toc .wrap{margin-right:calc(272px + (100vw - 272px - 920px) / 2)}
+  .has-toc main,.has-toc .wrap,.has-toc .sitebar div{margin-right:calc(272px + (100vw - 272px - 920px) / 2)}
 }
 @media (max-width:1099px){
   .to-top{right:auto;left:16px}
