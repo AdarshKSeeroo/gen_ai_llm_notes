@@ -31,11 +31,11 @@
 <h3>1.1 Data format</h3>
 <p>Same format you used for Gemma — JSONL with chat messages, one conversation per line:</p>
 <pre><code>{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}</code></pre>
-<p>Keep <code>train.jsonl</code>, <code>valid.jsonl</code>, <code>test.jsonl</code> in <code>~/mlx-tuning/data/</code>. Reuse <code>make_dataset.py</code> to generate more examples.</p>
+<p>Keep <code>train.jsonl</code>, <code>valid.jsonl</code>, <code>test.jsonl</code> in <code>~/mlx-tuning/training/data/</code>. Reuse <code>make_dataset.py</code> to generate more examples.</p>
 
 <h3>1.2 Train the LoRA adapter</h3>
-<pre><code>cd ~/mlx-tuning
-source my_env/bin/activate
+<pre><code>cd ~/mlx-tuning/training
+source ~/mlx-tuning/my_env/bin/activate
 
 mlx_lm.lora \
   --model mlx-community/Llama-3.2-3B-Instruct-4bit \
@@ -143,6 +143,7 @@ llama-quantize \
 <p>Keeps conversation history between turns in the same session. Ctrl+C or <code>exit</code> to quit.</p>
 
 <h3>2.3 Local API server (OpenAI-compatible)</h3>
+<p class="muted">This is the built-in server for a single model. For a multi-model server with a chat page, see 2.4.</p>
 <p><strong>Without fusing:</strong></p>
 <pre><code>mlx_lm.server \
   --model mlx-community/Llama-3.2-3B-Instruct-4bit \
@@ -157,7 +158,249 @@ llama-quantize \
     "messages": [{"role": "user", "content": "where is seeroo it solutions located"}]
   }'</code></pre>
 
-<h3>2.4 Scripting with the Python API</h3>
+<h3>2.4 Custom FastAPI server with a chat page — <code>server/gemma_server.py</code></h3>
+<p><code>mlx_lm.server</code> (2.3) serves one model. For this project there is also a small FastAPI server that keeps <strong>four model choices</strong> behind one OpenAI-compatible API (base and fine-tuned, Gemma and Llama) and serves a simple <strong>chat web page</strong>. Files: <code>server/gemma_server.py</code> and <code>server/chat.html</code>.</p>
+<pre><code>cd ~/mlx-tuning
+source my_env/bin/activate
+pip install fastapi uvicorn          # once
+uvicorn server.gemma_server:app --port 8000</code></pre>
+<p>Then open <code>http://localhost:8000</code> for the chat page, or <code>http://localhost:8000/docs</code> for the interactive API docs.</p>
+
+<table>
+<tr><th>Endpoint</th><th>What it does</th></tr>
+<tr><td><code>GET /</code></td><td>Chat web page (model dropdown, temperature, max tokens, system prompt, streaming replies)</td></tr>
+<tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible chat, with <code>"stream": true</code> support</td></tr>
+<tr><td><code>GET /v1/models</code></td><td>Lists the four model names</td></tr>
+<tr><td><code>POST /chat</code></td><td>Simpler endpoint: <code>prompt</code>, optional <code>system</code>, <code>model</code>, <code>max_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></td></tr>
+<tr><td><code>GET /health</code></td><td>Available models and which are currently loaded</td></tr>
+</table>
+
+<p>Pick the model with the <code>model</code> field:</p>
+<table>
+<tr><th>Name</th><th>What it is</th></tr>
+<tr><td><code>gemma-tuned</code></td><td>Gemma 3 270M + <code>training/adapters</code> (default)</td></tr>
+<tr><td><code>gemma-base</code></td><td>Plain Gemma 3 270M, no adapter</td></tr>
+<tr><td><code>llama-tuned</code></td><td>Llama 3.2 3B 4-bit + <code>training/adapters_llama</code></td></tr>
+<tr><td><code>llama-base</code></td><td>Plain Llama 3.2 3B 4-bit</td></tr>
+</table>
+<pre><code>curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-tuned",
+    "messages": [{"role": "user", "content": "where is seeroo it solutions located"}],
+    "max_tokens": 100,
+    "temperature": 0.3
+  }'</code></pre>
+<p>Any OpenAI client works against it:</p>
+<pre><code>from openai import OpenAI
+c = OpenAI(base_url="http://localhost:8000/v1", api_key="none")
+r = c.chat.completions.create(model="gemma-base",
+        messages=[{"role": "user", "content": "Where is Seeroo IT Solutions located?"}])
+print(r.choices[0].message.content)</code></pre>
+
+<div class="note"><strong>Design notes</strong>
+<ul>
+  <li>Models <strong>load on first use</strong> and at most <code>MAX_LOADED = 2</code> stay in RAM; the oldest is dropped when a third is requested (Llama 3B is ~2 GB on an 8 GB Mac). The first request to a Llama model takes a few seconds.</li>
+  <li>Requests are handled <strong>one at a time</strong> (an <code>asyncio.Lock</code>), since MLX uses the single Apple GPU.</li>
+  <li>Generation runs on the same thread that loaded the model. MLX streams are thread-local, so using <code>asyncio.to_thread</code> fails with <em>"There is no Stream(cpu, 0) in current thread"</em>.</li>
+  <li>An unknown model name returns a 404 that lists the valid names.</li>
+  <li>The server has no login. Keep it on <code>localhost</code>; if you use <code>--host 0.0.0.0</code> to reach it from a phone, do so only on a trusted network.</li>
+</ul>
+</div>
+
+<h4>Full source</h4>
+<pre><code>&quot;&quot;&quot;FastAPI server for the local MLX Gemma model (base + optional LoRA adapter).
+
+Run (from the mlx-tuning folder):  uvicorn server.gemma_server:app --port 8000
+Chat: http://127.0.0.1:8000/   API docs: http://127.0.0.1:8000/docs
+&quot;&quot;&quot;
+import asyncio
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import mlx.core as mx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from mlx_lm import load, stream_generate
+from mlx_lm.sample_utils import make_sampler
+from pydantic import BaseModel, Field
+
+TRAINING = Path(__file__).resolve().parent.parent / &quot;training&quot;
+
+# name -&gt; (HF model, LoRA adapter folder or None). Names go in the &quot;model&quot; field.
+MODELS = {
+    &quot;gemma-tuned&quot;: (&quot;google/gemma-3-270m-it&quot;, str(TRAINING / &quot;adapters&quot;)),
+    &quot;gemma-base&quot;: (&quot;google/gemma-3-270m-it&quot;, None),
+    &quot;llama-tuned&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, str(TRAINING / &quot;adapters_llama&quot;)),
+    &quot;llama-base&quot;: (&quot;mlx-community/Llama-3.2-3B-Instruct-4bit&quot;, None),
+}
+DEFAULT = &quot;gemma-tuned&quot;
+MAX_LOADED = 2  # models kept in RAM at once (8GB Mac: Llama 3B is ~2GB); oldest is evicted
+
+state = {}  # name -&gt; (model, tokenizer), in load order
+
+
+def get_model(name: str):
+    &quot;&quot;&quot;Load on first use. Must run on the event-loop thread (MLX streams are thread-local).&quot;&quot;&quot;
+    if name not in MODELS:
+        raise HTTPException(404, f&quot;Unknown model &#x27;{name}&#x27;. Choose from {list(MODELS)}&quot;)
+    if name not in state:
+        while len(state) &gt;= MAX_LOADED:
+            state.pop(next(iter(state)))
+            mx.clear_cache()
+        repo, adapter = MODELS[name]
+        state[name] = load(repo, adapter_path=adapter)
+    return state[name]
+lock = asyncio.Lock()  # MLX runs on one GPU: handle one generation at a time
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_model(DEFAULT)  # warm up the default model
+    yield
+    state.clear()
+
+
+app = FastAPI(title=&quot;MLX Gemma&quot;, lifespan=lifespan)
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    max_tokens: int = Field(200, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base
+
+
+def build_prompt(req: ChatRequest) -&gt; str:
+    messages = []
+    if req.system:
+        messages.append({&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: req.system})
+    messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: req.prompt})
+    return get_model(req.model)[1].apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+
+
+def generate_chunks(req: ChatRequest):
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    model, tok = get_model(req.model)
+    for r in stream_generate(
+        model,
+        tok,
+        build_prompt(req),
+        max_tokens=req.max_tokens,
+        sampler=sampler,
+    ):
+        yield r.text
+
+
+@app.get(&quot;/&quot;, include_in_schema=False)
+def root():
+    return FileResponse(Path(__file__).with_name(&quot;chat.html&quot;))
+
+
+@app.get(&quot;/health&quot;)
+def health():
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;available&quot;: list(MODELS), &quot;loaded&quot;: list(state)}
+
+
+@app.post(&quot;/chat&quot;)
+async def chat(req: ChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    if req.stream:
+        async def sse():
+            async with lock:
+                for text in generate_chunks(req):
+                    yield f&quot;data: {json.dumps({&#x27;text&#x27;: text})}\n\n&quot;
+                    await asyncio.sleep(0)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)
+
+    async with lock:
+        text = &quot;&quot;.join(generate_chunks(req))  # same thread as load(): MLX streams are thread-local
+    return {&quot;response&quot;: text}
+
+
+# ---------- OpenAI-compatible API ----------
+class OAIMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OAIChatRequest(BaseModel):
+    model: str = DEFAULT  # gemma-tuned | gemma-base | llama-tuned | llama-base
+    messages: list[OAIMessage]
+    max_tokens: int = Field(256, ge=1, le=2048)
+    temperature: float = Field(0.3, ge=0, le=2)
+    top_p: float = Field(0.9, gt=0, le=1)
+    stream: bool = False
+
+
+def oai_chunks(req: OAIChatRequest):
+    model, tok = get_model(req.model)
+    prompt = tok.apply_chat_template(
+        [m.model_dump() for m in req.messages], add_generation_prompt=True, tokenize=False
+    )
+    sampler = make_sampler(temp=req.temperature, top_p=req.top_p)
+    return stream_generate(
+        model, tok, prompt, max_tokens=req.max_tokens, sampler=sampler
+    )
+
+
+@app.get(&quot;/v1/models&quot;)
+def list_models():
+    return {&quot;object&quot;: &quot;list&quot;, &quot;data&quot;: [{&quot;id&quot;: m, &quot;object&quot;: &quot;model&quot;, &quot;owned_by&quot;: &quot;local&quot;} for m in MODELS]}
+
+
+@app.post(&quot;/v1/chat/completions&quot;)
+async def chat_completions(req: OAIChatRequest):
+    get_model(req.model)  # load/validate before streaming starts
+    cid, created = f&quot;chatcmpl-{uuid.uuid4().hex[:24]}&quot;, int(time.time())
+
+    if req.stream:
+        def chunk(delta, finish=None):
+            body = {&quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion.chunk&quot;, &quot;created&quot;: created,
+                    &quot;model&quot;: req.model, &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;delta&quot;: delta, &quot;finish_reason&quot;: finish}]}
+            return f&quot;data: {json.dumps(body)}\n\n&quot;
+
+        async def sse():
+            async with lock:
+                yield chunk({&quot;role&quot;: &quot;assistant&quot;})
+                for r in oai_chunks(req):
+                    yield chunk({&quot;content&quot;: r.text})
+                    await asyncio.sleep(0)
+            yield chunk({}, &quot;stop&quot;)
+            yield &quot;data: [DONE]\n\n&quot;
+
+        return StreamingResponse(sse(), media_type=&quot;text/event-stream&quot;)
+
+    def run():
+        parts, last = [], None
+        for r in oai_chunks(req):
+            parts.append(r.text)
+            last = r
+        return &quot;&quot;.join(parts), last
+
+    async with lock:
+        text, last = run()  # same thread as load(): MLX streams are thread-local
+    pt = getattr(last, &quot;prompt_tokens&quot;, 0)
+    ct = getattr(last, &quot;generation_tokens&quot;, 0)
+    return {
+        &quot;id&quot;: cid, &quot;object&quot;: &quot;chat.completion&quot;, &quot;created&quot;: created, &quot;model&quot;: req.model,
+        &quot;choices&quot;: [{&quot;index&quot;: 0, &quot;message&quot;: {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: text},
+                     &quot;finish_reason&quot;: &quot;stop&quot;}],
+        &quot;usage&quot;: {&quot;prompt_tokens&quot;: pt, &quot;completion_tokens&quot;: ct, &quot;total_tokens&quot;: pt + ct},
+    }
+</code></pre>
+
+<h3>2.5 Scripting with the Python API</h3>
 <p><strong>Without fusing</strong> (pass <code>adapter_path</code> to <code>load</code>):</p>
 <pre><code>from mlx_lm import load, generate
 
@@ -520,7 +763,7 @@ python3 ask_doc.py report.pdf</code></pre>
 </ul>
 </div>
 
-<footer>Reference file — update as your mlx-tuning workflow evolves. Lives at <code>~/mlx-tuning/mlx-guide.html</code>.</footer>
+<footer>Reference file — update as your mlx-tuning workflow evolves. Lives at <code>~/mlx-tuning/docs/mlx-guide.html</code>.</footer>
 
 </div>
 <script src="toc.js"></script>
