@@ -21,6 +21,7 @@
 <a href="#t7">Memory</a>
 <a href="#t8">Tools &amp; structured output</a>
 <a href="#t9">Frameworks</a>
+<a href="#t10">Agentic AI</a>
 </nav>
 
 <section id="glossary">
@@ -735,6 +736,37 @@ print(json.dumps(search_config.model_dump(), indent=2))</pre>
 <tr><td><b>Plain SDKs</b></td><td>Direct provider libraries</td><td>Simple apps, full control, huge scale</td><td>You build and maintain hybrid search, query expansion etc. yourself</td></tr>
 </table>
 <div class="note"><b>Mental model:</b> LangSmith = the black-box recorder, LangGraph = the flight controls, LlamaIndex = the data loader, Haystack = the explicit pipeline, Semantic Kernel = the Azure/.NET connector. A common hybrid: LlamaIndex for ingestion, plain SDK for serving, tracing on top.</div>
+</section>
+<section id="t10">
+<h2>Agentic AI vs. regular LLMs</h2>
+<p>A regular LLM is a <b>brain in a jar</b>: vast knowledge, but passive. It waits for a prompt, writes a response and stops. Agentic AI wraps that LLM in an <b>agentic harness</b> (memory, tools and a feedback loop) so it works toward a goal with minimal human supervision, more like a project manager than a text generator.</p>
+
+<h3>Side-by-side</h3>
+<table>
+<tr><th>Feature</th><th>Regular LLM</th><th>Agentic AI</th></tr>
+<tr><td>Execution</td><td>Single-turn: one prompt in, one response out</td><td>Multi-step: iterative loops that can run for minutes</td></tr>
+<tr><td>State</td><td>Stateless unless you feed history back in</td><td>Stateful: persistent memory, task logs, context</td></tr>
+<tr><td>Action</td><td>Information provider: generates text, code or media</td><td>Action executor: calls APIs, edits files, triggers systems</td></tr>
+<tr><td>Direction</td><td>Depends on precise instructions (prompt engineering)</td><td>Driven by a high-level objective (goal-oriented)</td></tr>
+</table>
+
+<h3>What the agentic layers add</h3>
+<ol>
+<li><b>Goal-oriented planning and decomposition:</b> a regular LLM tries to answer a big request in one go; an agent splits "onboard a new employee" into ordered sub-tasks.</li>
+<li><b>Think, act, observe loop:</b> decide, execute, look at the result, then adapt if there was an error or the environment changed.</li>
+<li><b>Tool calling:</b> connects to databases, CRMs, browsers; the agent decides <i>when</i> a tool is needed. See <a href="#t8">Tool calling</a>.</li>
+<li><b>Persistent memory:</b> short-term for the current sub-tasks, long-term for preferences and past performance. See <a href="#t7">Memory</a>.</li>
+<li><b>Multi-agent orchestration:</b> a coordinating layer runs several specialised agents (for example a coding agent and a testing agent) together.</li>
+</ol>
+<div class="flow"><span>Goal</span><i>&rarr;</i><span>Plan</span><i>&rarr;</i><span>Act (tool)</span><i>&rarr;</i><span>Observe</span><i>&rarr;</i><span>Adapt / repeat</span><i>&rarr;</i><span>Done</span></div>
+
+<h3>Example for the presentation: organise a customer event</h3>
+<div class="grid">
+<div class="card"><span class="tag neu">Regular LLM</span><p>Drafts an agenda, an invitation template and venue ideas, then stops. You copy-paste and do the work.</p></div>
+<div class="card"><span class="tag good">Agentic AI</span><p>Given the goal "organise the customer event", it checks calendars, books a room through a vendor API, sends invitations, logs RSVPs in a spreadsheet and updates the layout if attendance changes.</p></div>
+</div>
+
+<div class="warn"><b>Trade-offs:</b> more autonomy means more cost (many LLM calls per task), more latency, and errors that compound across steps. Limit what tools can do, cap loop iterations, log every step (see <a href="frameworks.html">LangSmith / LangGraph</a>) and require human approval for irreversible actions.</div>
 </section>
 </main>
 </body>
